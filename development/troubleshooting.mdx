@@ -1,0 +1,139 @@
+---
+title: "Troubleshooting WidevineProxy2 Key Extraction Issues"
+sidebarTitle: "Troubleshooting"
+description: "Diagnose missing keys, rejected license challenges, proxy mode conflicts, and other common issues using the DRM status display and browser console logs."
+---
+
+Most issues with WidevineProxy2 fall into a small number of recognisable patterns. The popup's DRM status indicators — **MediaKeys**, **Session**, **Generated**, **Challenge**, and **License** — tell you exactly how far through the EME handshake the extension reached, which narrows the cause considerably. Start with the debug table, then use the accordion items below for deeper investigation.
+
+## DRM Status Indicator Reference
+
+Each indicator in the popup is activated by a specific EME event:
+
+| Indicator | Activated when |
+|---|---|
+| `MediaKeys` | `MediaKeySystemAccess.createMediaKeys()` is called |
+| `Session` | `MediaKeys.createSession()` is called |
+| `Generated` | `MediaKeySession.generateRequest()` is called |
+| `Challenge` | `MediaKeyMessageEvent` fires with `.message.byteLength > 2` |
+| `License` | `MediaKeySession.update()` is called with a `SignedMessage` of type `LICENSE` |
+
+## Issue Debug Table
+
+The table covers the most common combinations of symptoms. "Challenge active" means the **Challenge** indicator is lit; "License active" means the **License** indicator is lit.
+
+| Keys appear | Video plays | Challenge active | License active | Possible cause | Possible fix |
+|---|---|---|---|---|---|
+| No | Yes | No | No | The page does not use DRM | No action needed |
+| No | Yes | Yes | No | Unable to intercept the license message | Try proxy mode `property`; if that also fails, [open an issue](https://github.com/DevLARLEY/WidevineProxy2/issues) |
+| No | No | No | No | Unknown — likely unrelated to the extension | Check the browser console for errors from the player itself |
+| No | No | Yes | No | The license endpoint rejects the re-signed challenge (Android CDM not accepted) | Try on an Android device, or load a Chrome Remote CDM |
+
+<Info>
+  The table above does not cover 100% of scenarios but is accurate for the vast majority of DRM-protected streams.
+</Info>
+
+If the license endpoint only accepts Android CDMs, two options are available:
+- Run WidevineProxy2 on an actual Android device running Chrome.
+- Switch to a Remote CDM that uses a Chrome-level device instead of an Android device.
+
+## Common Issues
+
+<Accordion title="Keys don't appear after video starts playing">
+  Work through the DRM status display in the popup before checking anything else:
+
+  1. **No indicators are lit at all** — the extension's content scripts may not be active on this page. Verify that a device is loaded in the popup (dropdown shows a device name, not "No device selected") and that the extension is enabled via the toggle.
+  2. **MediaKeys / Session / Generated lit, but Challenge is not** — the player is not firing a `MediaKeyMessageEvent` with a non-empty message. This is uncommon and usually indicates the player defers EME setup; try reloading the page.
+  3. **Challenge lit but License is not** — see the "Challenge intercepted but License never fires" accordion below.
+  4. **All five indicators lit but still no keys** — the license response parsed successfully but contained no content keys of type `2`. This is rare; open an issue with the challenge and license bytes (do not share keys from commercially licensed content).
+</Accordion>
+
+<Accordion title="'No remote CDM selected' error">
+  This error appears in the popup or in the browser console when the device type is set to **Remote CDM** but no `remote.json` file has been loaded.
+
+  To resolve it:
+  1. Open the extension popup.
+  2. Set device type to **Remote CDM**.
+  3. Click **+ Choose File** in the dropdown.
+  4. In the file picker window, click **Choose File** again and select your `remote.json` file.
+
+  The `remote.json` file must contain `host`, `secret`, and `device_name` fields matching your pywidevine-compatible CDM server configuration.
+</Accordion>
+
+<Accordion title="Challenge intercepted but License never fires">
+  The **License** indicator remains unlit when `MediaKeySession.update()` is either never called or called with a response that does not decode as a `SignedMessage` of type `LICENSE`.
+
+  The most common cause is that the license server rejected the re-signed challenge. Possible reasons:
+
+  - The endpoint validates the challenge signature against a specific CDM device class and the loaded `.wvd` device (typically Android level-3) does not pass that check.
+  - The endpoint uses one-time tokens embedded in the original challenge, and the re-signing process invalidated them. WidevineProxy2 preserves the original `contentId` when re-signing, but some servers perform additional validation.
+
+  **What to try:**
+  - Switch to a Chrome-level Remote CDM device, which is more likely to be accepted by restrictive endpoints.
+  - Try the extension on an Android device running Chrome with a device dumped from that same device.
+</Accordion>
+
+<Accordion title="Property proxy mode reverted to event mode">
+  When the device type is **Remote CDM**, the extension automatically falls back from `property` proxy mode to `event` proxy mode. This happens because property mode requires synchronously replacing `e.message` on the event object, but the Remote CDM path is asynchronous (it must round-trip to the background service worker and then to the remote API).
+
+  Event mode is fully compatible with Remote CDM. If you explicitly set `proxy_mode` to `property` for a remote device, the extension reverts to `event` silently. You will see `Intercepted (event/...)` in the console rather than `Intercepted (property/...)`.
+</Accordion>
+
+<Accordion title="Extension shows an 'Outdated' warning in the popup">
+  The background service worker checks the latest release version on GitHub every 12 hours. If the installed version is older than the latest release, the popup displays an outdated warning.
+
+  Download the latest release from:
+
+  **https://github.com/DevLARLEY/WidevineProxy2/releases/latest**
+
+  For Chrome, drag-and-drop the `.zip` file into `chrome://extensions/` (Developer mode must be enabled). For Firefox, use the `.xpi` for a persistent install or the `.zip` for a temporary load via `about:debugging`.
+</Accordion>
+
+<Accordion title="ClearKey video but no keys extracted">
+  ClearKey key extraction relies on `MediaKeySession.update()` being called with a valid JSON response body containing a `keys` array. Specifically, the extension calls `JSON.parse()` on the license bytes — if parsing succeeds, the `keys` array is decoded as base64url key IDs and key values.
+
+  Common reasons ClearKey keys are missed:
+
+  - **The player never calls `update()`** with the license — some ClearKey implementations use the `keyids` init data type and never receive a license response. In this case the **License** indicator will remain unlit.
+  - **The response body is not valid JSON** — check the actual bytes passed to `update()` in the browser console. The extension logs `[WVP2] ClearKey Keys [...]` when parsing succeeds.
+  - **The `keys` array uses a non-standard structure** — the extension expects each element to have `kid` and `k` fields encoded as base64url strings, as specified in the W3C ClearKey spec.
+</Accordion>
+
+<Accordion title="Firefox: 'Could not establish connection' console error">
+  This message appears when the popup attempts to send a message to a tab where the isolated-world content script is not running. This is expected behaviour on browser-internal pages (e.g. `about:newtab`, `about:addons`, `moz-extension://...`) where content scripts cannot be injected.
+
+  The error is harmless and does not affect operation on normal web pages. If it appears on a regular HTTPS page where you expect the extension to work, check that the extension is enabled and that a device is loaded — without both conditions, the content scripts are unregistered and the connection error is expected.
+</Accordion>
+
+## Debug Logging
+
+All log output from the main world script is prefixed with `[WVP2]` and appears in the **page's own DevTools console** (not the extension's background console). Open DevTools with F12, navigate to the **Console** tab, and filter by `[WVP2]`.
+
+Key log messages and what they mean:
+
+| Log message | Meaning |
+|---|---|
+| `[WVP2] [abc123] Widevine Keys [...]` | Keys extracted from a Widevine license; `[abc123]` is the random frame ID |
+| `[WVP2] [abc123] ClearKey Keys [...]` | Keys extracted from a ClearKey license response |
+| `[WVP2] New challenge: <base64>` | Re-signed challenge bytes, base64-encoded, about to be dispatched to the player |
+| `[WVP2] [abc123] Intercepted (event/function)` | Challenge intercepted in event proxy mode, listener was a plain function |
+| `[WVP2] [abc123] Intercepted (property/object)` | Challenge intercepted in property proxy mode, listener was an object with `handleEvent` |
+| `[WVP2] [abc123] Server Cert (setServerCertificate): Provider ID: ..., Created: ...` | Service certificate was set; shows provider and creation timestamp |
+| `[WVP2] [abc123] Server Cert (message): ...` | Service certificate delivered via `MediaKeyMessageEvent` of type `service-certificate` |
+
+The **frame ID** in brackets (e.g., `[abc123]`) is generated randomly per-frame at injection time. If a page embeds video in an `<iframe>`, each frame will have a distinct ID, making it easy to trace which frame produced which keys.
+
+<Tip>
+  To see background service worker logs (version check output, script registration events), open the extension's background page DevTools via `chrome://extensions` → WidevineProxy2 → **Service Worker** link.
+</Tip>
+
+## Getting Help
+
+If you have worked through the above and still cannot extract keys, open an issue on GitHub with:
+
+- The URL of the page (if publicly accessible)
+- Which DRM status indicators were lit
+- The `[WVP2]` log output from the page console
+- The browser and extension version
+
+**https://github.com/DevLARLEY/WidevineProxy2/issues**

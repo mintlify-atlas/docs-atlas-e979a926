@@ -1,0 +1,89 @@
+{
+  "projectType": "frontend",
+  "projectName": "WidevineProxy2",
+  "projectDescription": "A browser extension (Chrome & Firefox) that intercepts and proxies Widevine/ClearKey EME license challenges, extracting decryption keys by re-signing requests with a local or remote CDM device.",
+  "theme": "luma",
+  "primaryColor": "#8c8c8b",
+  "lightColor": "#21313f",
+  "darkColor": "#cccccb",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "introduction",
+              "installation",
+              "setup"
+            ]
+          },
+          {
+            "group": "Devices",
+            "pages": [
+              "devices/local-wvd",
+              "devices/remote-cdm"
+            ]
+          },
+          {
+            "group": "Usage",
+            "pages": [
+              "usage/capturing-keys",
+              "usage/drm-status",
+              "usage/key-history",
+              "usage/download-commands"
+            ]
+          },
+          {
+            "group": "Configuration",
+            "pages": [
+              "configuration/proxy-modes",
+              "configuration/service-certificate",
+              "configuration/settings-reference"
+            ]
+          },
+          {
+            "group": "Development",
+            "pages": [
+              "development/building",
+              "development/architecture",
+              "development/troubleshooting"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "Intercepts Widevine and ClearKey EME license challenges in-page",
+    "Bypasses one-time tokens, hashes, and license wrapping",
+    "Supports local .wvd Widevine Device files",
+    "Supports remote CDM servers (pywidevine-compatible API)",
+    "Real-time DRM status indicator (MediaKeys → Session → Generated → Challenge → License)",
+    "Key history viewer with PSSH, key IDs, and key values",
+    "Auto-generates N_m3u8DL-RE / shaka-packager download commands",
+    "Manifest V3 compliant; works in Chrome and Firefox",
+    "Dark mode UI, mobile-friendly popup",
+    "Version update checker"
+  ],
+  "publicApiSurface": [
+    "RemoteCdm.open(host, secret, deviceName) → RemoteCdm",
+    "RemoteCdm.setServiceCertificate(certificateB64)",
+    "RemoteCdm.getLicenseChallenge(initDataB64, privacyMode) → challengeB64",
+    "RemoteCdm.parseLicense(licenseB64) → [{kid, k}]",
+    "Session(contentDecryptionModule)",
+    "Session.setServiceCertificate(serviceCertificate)",
+    "Session.getLicenseChallenge(messageBytes, encryptClientId) → {licenseRequest, requestId}",
+    "Session.parseLicense(licenseBytes) → [{kid, k}]",
+    "Session.getPsshData() → Uint8Array",
+    "Util.proxy(object, method, handler)",
+    "Util.emit(type, data, options) → Promise",
+    "buildCommand(entry, settings, manifestIndex) → string",
+    "chrome.storage.sync keys: enabled, selected, selected_remote_cdm, server_cert, proxy_mode, device_type, devices, remote_cdms, dark_mode, exe_name, additional_args, use_shaka, use_single_quotes, save_name",
+    "Message types: REMOTE_OPEN, REMOTE_SET_SERVICE_CERTIFICATE, REMOTE_GET_CHALLENGE, REMOTE_PARSE, OPEN_PICKER_WVD, OPEN_PICKER_REMOTE, IS_OUTDATED, EME_STATUS_ACTIVE, EME_STATUS_REACTIVE, MANIFEST_HEADERS, SETTINGS, KEYS, MANIFEST_URL",
+    "npm run bundle — build all JS bundles",
+    "npm run package [chrome|firefox|both] — package into .zip/.xpi",
+    "npm run publish — bundle + package"
+  ]
+}

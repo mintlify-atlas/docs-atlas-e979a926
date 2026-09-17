@@ -1,0 +1,99 @@
+---
+title: "Installing WidevineProxy2 in Chrome and Firefox"
+sidebarTitle: "Installation"
+description: "Step-by-step instructions for installing the WidevineProxy2 extension in Chrome via drag-and-drop and in Firefox via persistent XPI or temporary ZIP loading."
+---
+
+WidevineProxy2 is distributed as a pre-packaged release from its GitHub repository — no build step is required for most users. Depending on your browser, you will download either a `.zip` file (Chrome, Firefox temporary) or a signed `.xpi` file (Firefox persistent). All release assets are available at [github.com/DevLARLEY/WidevineProxy2/releases/latest](https://github.com/DevLARLEY/WidevineProxy2/releases/latest).
+
+<Note>
+  WidevineProxy2 is fully **Manifest V3 compliant**. It uses `chrome.scripting.registerContentScripts` to inject its ISOLATED and MAIN world scripts dynamically, and a service worker for its background context — satisfying the MV3 requirements enforced by Chrome's Web Store and Firefox's add-on review process alike.
+</Note>
+
+<Tabs>
+  <Tab title="Chrome">
+    Chrome does not support installing unsigned extensions from the Web Store outside of developer mode, so the extension is loaded as an unpacked or dragged-in ZIP.
+
+    <Steps>
+      <Step title="Download the ZIP">
+        Go to [github.com/DevLARLEY/WidevineProxy2/releases/latest](https://github.com/DevLARLEY/WidevineProxy2/releases/latest) and download the `.zip` release asset. Do **not** extract it.
+      </Step>
+      <Step title="Open the Extensions page">
+        In the Chrome address bar, navigate to:
+
+        ```
+        chrome://extensions/
+        ```
+      </Step>
+      <Step title="Enable Developer mode">
+        In the top-right corner of the Extensions page, toggle **Developer mode** on. This reveals the extra controls needed to load unpacked or dragged-in extensions.
+      </Step>
+      <Step title="Drag and drop the ZIP">
+        Drag the downloaded `.zip` file from your file manager and drop it anywhere onto the `chrome://extensions/` page. Chrome will unpack and install it automatically.
+
+        The WidevineProxy2 icon will appear in your browser toolbar once installation is complete.
+      </Step>
+    </Steps>
+
+    <Tip>
+      If the toolbar icon is not immediately visible, click the puzzle-piece **Extensions** menu in the Chrome toolbar and pin WidevineProxy2 for quick access.
+    </Tip>
+  </Tab>
+
+  <Tab title="Firefox — Persistent">
+    A persistent installation survives browser restarts and behaves like any other add-on. This method requires the signed `.xpi` file.
+
+    <Steps>
+      <Step title="Download the XPI">
+        Go to [github.com/DevLARLEY/WidevineProxy2/releases/latest](https://github.com/DevLARLEY/WidevineProxy2/releases/latest) and download the `.xpi` release asset.
+      </Step>
+      <Step title="Open the Add-ons Manager">
+        In the Firefox address bar, navigate to:
+
+        ```
+        about:addons
+        ```
+      </Step>
+      <Step title="Open the settings menu">
+        Click the **gear icon** (⚙) near the top of the page to open the add-ons settings menu.
+      </Step>
+      <Step title="Install from file">
+        Choose **Install Add-on From File…** and select the `.xpi` file you downloaded. Firefox will prompt you to confirm the installation — click **Add**.
+
+        The WidevineProxy2 icon will appear in your toolbar once the add-on is active.
+      </Step>
+    </Steps>
+  </Tab>
+
+  <Tab title="Firefox — Temporary">
+    A temporary installation is removed when Firefox is closed. It is useful for testing or when a signed `.xpi` is not available. This method uses the `.zip` file.
+
+    <Steps>
+      <Step title="Download the ZIP">
+        Go to [github.com/DevLARLEY/WidevineProxy2/releases/latest](https://github.com/DevLARLEY/WidevineProxy2/releases/latest) and download the `.zip` release asset. Do **not** extract it.
+      </Step>
+      <Step title="Open the Debugging page">
+        In the Firefox address bar, navigate to:
+
+        ```
+        about:debugging#/runtime/this-firefox
+        ```
+      </Step>
+      <Step title="Load the temporary add-on">
+        Click **Load Temporary Add-on…** and select the downloaded `.zip` file (or any file contained within it). Firefox installs the extension for the current browser session.
+      </Step>
+    </Steps>
+
+    <Warning>
+      Temporary add-ons are removed every time Firefox is closed. You will need to reload the extension each session. For a permanent installation, use the **Persistent** method with the signed `.xpi` instead.
+    </Warning>
+  </Tab>
+</Tabs>
+
+## After Installation
+
+Once the extension is installed and its icon is visible in the toolbar, the extension is not yet active — you still need to add a Widevine device and enable it in the popup. Head to the setup guide to complete configuration.
+
+<Card title="Configure the Extension" icon="sliders" href="/setup">
+  Add a Widevine device file or Remote CDM, choose your proxy mode, and enable the extension so it begins intercepting EME challenges.
+</Card>

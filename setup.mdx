@@ -1,0 +1,114 @@
+---
+title: "Configuring WidevineProxy2 After Installation"
+sidebarTitle: "Setup"
+description: "Configure your Widevine device or Remote CDM, select a proxy mode, set the service certificate option, and enable the extension before capturing decryption keys."
+---
+
+After installing the extension, you need to open its popup and complete a short configuration before WidevineProxy2 will intercept any EME challenges. The popup is the single control surface for all settings — device selection, proxy mode, and the enable toggle all live here. The steps below walk through the full initial setup.
+
+<Steps>
+  <Step title="Open the popup">
+    Click the **WidevineProxy2** icon in your browser toolbar to open the popup window. The header displays the current extension version and a status pill showing **disabled** until configuration is complete.
+
+    <Tip>
+      If the icon is not visible in Chrome, click the puzzle-piece **Extensions** button in the toolbar and pin WidevineProxy2 to keep it accessible.
+    </Tip>
+  </Step>
+
+  <Step title="Choose your device type">
+    In the **Settings** section of the popup, locate the **Device Type** segmented control. It has two options:
+
+    - **Widevine Device** (radio button `wvd_select`) — use a local `.wvd` file. All CDM operations run inside the extension; no external server is contacted.
+    - **Remote CDM** (radio button `remote_select`) — delegate CDM operations to a remote API server configured via a `remote.json` file.
+
+    Select the option that matches the credential type you have. The section below the control updates to show only the relevant device panel.
+
+    <Warning>
+      **Remote CDM is incompatible with `property` proxy mode.** If you select Remote CDM while `property` mode is active, the extension automatically reverts to `event` mode and saves the change. Likewise, selecting `property` mode while Remote CDM is active disables the Remote CDM option until you switch back to `event` mode.
+    </Warning>
+  </Step>
+
+  <Step title="Add a device">
+    Click the **dropdown** in the device panel that appeared in the previous step. The dropdown opens a menu listing all previously loaded devices, along with an **`+ Choose File`** entry at the bottom.
+
+    Click **`+ Choose File`** to open a small picker window. Inside that window, click **Choose File** again and select your file:
+
+    <Tabs>
+      <Tab title="Widevine Device (.wvd)">
+        Select a `.wvd` file. If you only have a raw `device_client_id_blob` and `device_private_key`, create the `.wvd` first:
+
+        ```bash
+        pywidevine create-device \
+          -k device_private_key \
+          -c device_client_id_blob \
+          -t "ANDROID" \
+          -l 3
+        ```
+
+        After the file is loaded, its name appears in the dropdown and the device is saved to `chrome.storage.sync`.
+      </Tab>
+      <Tab title="Remote CDM">
+        Select your `remote.json` configuration file. The file should contain the `host`, `secret`, and `device_name` fields required by the Remote CDM API. After loading, the configuration name appears in the dropdown.
+      </Tab>
+    </Tabs>
+
+    <Accordion title="Managing devices in the dropdown">
+      Each entry in the open dropdown shows two icon glyphs on the right:
+
+      - **Download glyph (↓)** — re-exports the stored device back to a file. For `.wvd` entries the binary is saved as a `.wvd` file; for Remote CDM entries the JSON configuration is saved as a `.json` file.
+      - **Remove glyph (🗑)** — deletes the entry from storage. If the removed device was currently selected, the selection automatically falls back to the first remaining device, or clears if no devices remain.
+
+      The same download and remove actions are also available on the dropdown trigger itself (without opening the menu) via the glyphs shown on the selected entry.
+    </Accordion>
+  </Step>
+
+  <Step title="Select proxy mode">
+    In the **Settings** section, the **Proxy mode** segmented control determines how intercepted challenges are replaced:
+
+    | Mode | Behaviour |
+    |---|---|
+    | **Event** *(default)* | Stops the original `MediaKeyMessageEvent` with `stopImmediatePropagation()` and dispatches a new `message` event carrying the re-signed challenge. Compatible with all device types. |
+    | **Property** | Overrides the `message` property on the existing event object in place using `Object.defineProperty`. Not available when Remote CDM is selected. |
+
+    Leave the mode set to **Event** unless a specific site fails to deliver keys with the default. If the extension detects challenges but keys never appear, switching to **Property** is the recommended first troubleshooting step (Widevine Device only).
+  </Step>
+
+  <Step title="Set the service certificate option">
+    The **Service cert** segmented control controls when the extension uses the Widevine service certificate to encrypt the client ID (privacy mode):
+
+    | Option | Behaviour |
+    |---|---|
+    | **Never** *(default)* | The client ID is never encrypted, regardless of whether the license server provides a service certificate. |
+    | **When used** | If the web player calls `MediaKeys.setServerCertificate()` or the server returns a `SERVICE_CERTIFICATE` message, the extension uses that certificate to enable privacy mode when generating the challenge. |
+
+    For most use cases, **Never** is sufficient. Use **When used** if the license endpoint requires an encrypted client ID to accept the challenge.
+  </Step>
+
+  <Step title="Enable the extension">
+    Check the **Enabled** checkbox at the top of the Settings section. The status pill in the header changes from **disabled** to **enabled**, and the background service worker registers the ISOLATED and MAIN world content scripts into all pages.
+
+    The extension is now active. Navigate to a page that uses Widevine or ClearKey DRM and play protected content — extracted keys will appear in the **Keys (past 5 min.)** section of the popup within moments of the license exchange completing.
+
+    <Info>
+      The toolbar icon briefly turns **red** whenever new keys are written to storage, then returns to its normal colour after 60 seconds. This provides a quick visual confirmation that keys were captured without opening the popup.
+    </Info>
+  </Step>
+</Steps>
+
+## DRM Status Indicators
+
+The **DRM Status** section of the popup shows a five-step progress bar that reflects the EME call sequence on the active tab in real time:
+
+| Indicator | Activated by |
+|---|---|
+| **MediaKeys** | `MediaKeySystemAccess.createMediaKeys()` called |
+| **Session** | `MediaKeys.createSession()` called |
+| **Generated** | `MediaKeySession.generateRequest()` called |
+| **Challenge** | `MediaKeyMessageEvent` with `.message.byteLength > 2` received |
+| **License** | `MediaKeySession.update()` called with a `SignedMessage` of type `LICENSE` |
+
+Each step turns green on success or red on failure. If **Challenge** is green but **License** never lights up, the license server may be rejecting the challenge — try switching proxy mode or consulting the issue debug table in the README.
+
+## Next Steps
+
+With the extension enabled and a device configured, you are ready to capture keys from any Widevine- or ClearKey-protected stream. Open the **History** page from the popup (top-right **History** button) to browse all previously captured key sets beyond the five-minute window shown in the main popup view.

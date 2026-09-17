@@ -1,0 +1,211 @@
+---
+title: "WidevineProxy2 Storage Keys and Settings Reference"
+sidebarTitle: "Settings Reference"
+description: "Full reference for every chrome.storage.sync and chrome.storage.local key used by WidevineProxy2, including types, defaults, and behavioural notes."
+---
+
+WidevineProxy2 persists its configuration and state across two Chrome extension storage areas. **`chrome.storage.sync`** holds user preferences and device registrations — these are tied to the browser profile and sync across devices. **`chrome.storage.local`** holds captured key history — this remains on the current machine only.
+
+All sync values are loaded at popup boot time and written back immediately on any UI change via `saveSync()`. The isolated content script reads a filtered subset of sync settings (`selected`, `selected_remote_cdm`, `server_cert`, `proxy_mode`, `device_type`) plus the selected device blob on every page load.
+
+---
+
+## `chrome.storage.sync` — User Preferences
+
+### Extension State
+
+<ParamField path="enabled" type="boolean" default="true">
+  Master enable/disable switch for the extension. When `false`, the injected page script still loads but the EME proxy hooks are inert — no challenges are intercepted or re-signed. Toggling this does not require a page reload; the setting is read at challenge time.
+</ParamField>
+
+---
+
+### Device Configuration
+
+<ParamField path="device_type" type='"WVD" | "REMOTE"' default='"WVD"'>
+  Controls which CDM backend is active.
+
+  - `"WVD"` — use a locally loaded `.wvd` Widevine Device file. The challenge is re-signed in-browser using the private key and client ID from the selected device.
+  - `"REMOTE"` — delegate challenge generation to a remote CDM server. The challenge is forwarded over HTTP and the response is used verbatim.
+
+  Switching device type automatically enforces proxy mode compatibility: selecting `"REMOTE"` forces `proxy_mode` back to `"event"` if `"property"` was previously set.
+</ParamField>
+
+<ParamField path="selected" type="string">
+  The display name of the currently active `.wvd` device. Must match an entry in the `devices` list. The blob itself is stored separately under `{selected}` as a base64-encoded string. Used only when `device_type` is `"WVD"`.
+</ParamField>
+
+<ParamField path="selected_remote_cdm" type="string">
+  The display name of the currently active remote CDM. Must match an entry in the `remote_cdms` list. The configuration object is stored separately under `{selected_remote_cdm}`. Used only when `device_type` is `"REMOTE"`.
+</ParamField>
+
+<ParamField path="devices" type="string[]">
+  Ordered list of loaded `.wvd` device display names. Each name is also a separate storage key whose value is the base64-encoded `.wvd` binary blob. Removing a device removes both its entry in this array and its individual key.
+</ParamField>
+
+<ParamField path="remote_cdms" type="string[]">
+  Ordered list of loaded remote CDM display names. Each name is also a separate storage key whose value is a JSON configuration object describing the remote endpoint. Removing a remote CDM removes both its entry in this array and its individual key.
+</ParamField>
+
+---
+
+### Device Blob Storage Format
+
+Each device or remote CDM is stored as an independent key alongside the preference keys:
+
+<Tabs>
+  <Tab title="WVD Device">
+    ```
+    Key:   {device_name}          (the display name, e.g. "my_android_device")
+    Value: "<base64 string>"      (binary .wvd file encoded as base64)
+    ```
+
+    When the device is selected, the isolated content script fetches this key, decodes the base64 string with `Util.readWidevineDevice`, and extracts the RSA private key and `ClientIdentification` blob.
+  </Tab>
+  <Tab title="Remote CDM">
+    ```
+    Key:   {display_name}         (the display name, e.g. "my_remote_cdm")
+    Value: { ...remoteConfigObj } (JSON object describing the remote endpoint)
+    ```
+
+    The object is loaded as-is and forwarded to background service worker messages (`REMOTE_OPEN`, `REMOTE_GET_CHALLENGE`, etc.).
+  </Tab>
+</Tabs>
+
+---
+
+### Privacy and Interception
+
+<ParamField path="server_cert" type="boolean" default="false">
+  Controls privacy mode (client ID encryption).
+
+  - `false` — **Never**: the `ClientIdentification` protobuf is always sent in plaintext inside the license challenge.
+  - `true` — **When Used**: if a service certificate is available for the current session (received via `MediaKeys.setServerCertificate()` or a `SERVICE_CERTIFICATE` message), the client ID is AES-CBC encrypted and the key is RSA-OAEP wrapped with the server's public key before the challenge is signed. Falls back to plaintext if no certificate is present.
+
+  See [Service Certificate](/configuration/service-certificate) for the full encryption flow.
+</ParamField>
+
+<ParamField path="proxy_mode" type='"event" | "property"' default='"event"'>
+  Selects the challenge interception strategy applied inside `interceptChallenge`.
+
+  - `"event"` — stops the original `MediaKeyMessageEvent` with `stopImmediatePropagation()` / `preventDefault()` and re-dispatches a new event carrying the re-signed challenge.
+  - `"property"` — keeps the original event alive and replaces its `message` accessor with `Object.defineProperty`. Incompatible with Remote CDM.
+
+  See [Proxy Modes](/configuration/proxy-modes) for a full comparison.
+</ParamField>
+
+---
+
+### User Interface
+
+<ParamField path="dark_mode" type="boolean" default="false">
+  Controls the popup colour theme. When `true` the `data-theme="dark"` attribute is set on the document root. When `false` the light theme is applied. Saved immediately on toggle.
+</ParamField>
+
+<ParamField path="command_options_collapsed" type="boolean" default="false">
+  Stores the collapsed/expanded state of the **Command Options** section in the popup. When `true` the section is rendered collapsed on next open. Defaults to `false` (expanded) if not present; the popup initialises to collapsed via `cmdSection.classList.toggle("collapsed", settings.command_options_collapsed !== false)`.
+</ParamField>
+
+---
+
+### Download Command Generation
+
+These settings control how WidevineProxy2 generates `N_m3u8DL-RE` download commands from captured keys and manifest URLs.
+
+<ParamField path="exe_name" type="string" default='"N_m3u8DL-RE"'>
+  The executable name (or full path) used as the first token in generated download commands. Change this if the binary is installed under a different name or is not on `PATH`.
+</ParamField>
+
+<ParamField path="additional_args" type="string">
+  A free-form string of extra arguments appended verbatim to the end of every generated download command. Useful for flags such as `--concurrent-download`, `--thread-count`, or custom header arguments.
+</ParamField>
+
+<ParamField path="use_shaka" type="boolean" default="false">
+  When `true`, appends `--use-shaka-packager` to generated commands, instructing `N_m3u8DL-RE` to use Shaka Packager for decryption instead of `mp4decrypt`. When `false` (default), `mp4decrypt` is used.
+</ParamField>
+
+<ParamField path="use_single_quotes" type="boolean" default="false">
+  When `true`, string arguments in generated commands are wrapped in single quotes (`'`), suitable for POSIX shells (bash/zsh). When `false` (default), double quotes (`"`) are used, which is compatible with both Windows CMD and POSIX shells.
+</ParamField>
+
+<ParamField path="save_name" type='"none" | "title" | "url"' default='"none"'>
+  Controls how the `--save-name` argument is populated in generated download commands.
+
+  - `"none"` — the `--save-name` argument is omitted entirely.
+  - `"title"` — uses the page `document.title` at the time the keys were captured.
+  - `"url"` — uses the page URL at the time the keys were captured.
+</ParamField>
+
+---
+
+## `chrome.storage.local` — Key History
+
+`chrome.storage.local` stores every set of keys extracted from a Widevine or ClearKey license response. Entries are keyed by the PSSH data string and persist until manually cleared from the History page.
+
+The popup's key list displays only entries captured within the past 5 minutes. The full history is accessible by clicking **History** in the popup, which opens `ui/history.html`.
+
+### Entry Schema
+
+Each entry is stored as:
+
+```
+Key:   {pssh_data}    (base64-encoded PSSH data, or a JSON string for ClearKey)
+Value: <entry object>
+```
+
+<ParamField path="{pssh_data}" type="object">
+  A captured key entry. The object has the following fields:
+
+  <ParamField path="keys" type="Array<{ kid: string, k: string }>">
+    Array of key–ID pairs. For Widevine, both `kid` and `k` are lowercase hex strings. For ClearKey, they are the decoded hex representations of the base64url-encoded `kid` and `k` values from the JSON license response.
+  </ParamField>
+
+  <ParamField path="pssh_data" type="string">
+    The same value used as the storage key. For Widevine this is the base64-encoded raw PSSH payload bytes. For ClearKey this is a base64-encoded JSON object containing the `kids` array.
+  </ParamField>
+
+  <ParamField path="timestamp" type="number">
+    Unix millisecond timestamp (`Date.getTime()`) recorded when the keys were parsed. Used by the popup to filter to the most recent 5 minutes.
+  </ParamField>
+
+  <ParamField path="type" type='"WIDEVINE" | "CLEARKEY"'>
+    DRM system that produced this entry.
+  </ParamField>
+
+  <ParamField path="url" type="string">
+    The `window.location.href` of the page that triggered the license exchange.
+  </ParamField>
+
+  <ParamField path="title" type="string">
+    The `document.title` of the page at the time the keys were captured. Used as the `--save-name` value when `save_name` is set to `"title"`.
+  </ParamField>
+
+  <ParamField path="manifests" type="Array<object>" >
+    Optional. An array of manifest URL entries collected by the background network observer for the same page origin. Each element contains at minimum a `url` string and, if request headers were captured, a `headers` object. Populated only if manifests were detected before the keys arrived.
+  </ParamField>
+</ParamField>
+
+---
+
+## Quick Reference Table
+
+| Key | Storage Area | Type | Default | Description |
+|---|---|---|---|---|
+| `enabled` | sync | boolean | `true` | Master on/off switch |
+| `device_type` | sync | `"WVD" \| "REMOTE"` | `"WVD"` | Active CDM backend |
+| `selected` | sync | string | — | Active WVD device name |
+| `selected_remote_cdm` | sync | string | — | Active remote CDM name |
+| `devices` | sync | string[] | — | List of loaded WVD names |
+| `remote_cdms` | sync | string[] | — | List of loaded remote CDM names |
+| `server_cert` | sync | boolean | `false` | Privacy mode / service certificate |
+| `proxy_mode` | sync | `"event" \| "property"` | `"event"` | Challenge interception strategy |
+| `dark_mode` | sync | boolean | `false` | Dark/light UI theme |
+| `exe_name` | sync | string | `"N_m3u8DL-RE"` | Downloader binary name |
+| `additional_args` | sync | string | — | Extra downloader arguments |
+| `use_shaka` | sync | boolean | `false` | Use Shaka Packager in commands |
+| `use_single_quotes` | sync | boolean | `false` | Single-quote command arguments |
+| `save_name` | sync | `"none" \| "title" \| "url"` | `"none"` | `--save-name` source |
+| `command_options_collapsed` | sync | boolean | `false` | Collapsed state of Command Options |
+| `{device_name}` | sync | string (base64) | — | WVD device blob |
+| `{display_name}` | sync | object | — | Remote CDM config object |
+| `{pssh_data}` | local | object | — | Captured key entry |

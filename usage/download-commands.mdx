@@ -1,0 +1,158 @@
+---
+title: "Generating N_m3u8DL-RE Download Commands from Captured Keys"
+sidebarTitle: "Download Commands"
+description: "Configure and copy auto-generated N_m3u8DL-RE commands with the correct manifest URL, request headers, and decryption keys for any captured entry."
+---
+
+Every key entry that includes a detected manifest URL comes with an auto-generated download command that you can copy and run directly in a terminal. The command is assembled from the manifest URL, the captured request headers, the extracted `kid:key` pairs, and the settings you configure in the popup's **Command Options** section. Changing any setting immediately refreshes all visible commands — no manual editing required.
+
+## Anatomy of a Generated Command
+
+The command is built by `buildCommand(entry, settings, manifestIndex)` in `keys-render.js`. It assembles positional parts in the following order:
+
+```
+{exe} {manifest_url} [--save-name {name}] [-H {header}: {value} ...] [--key {kid}:{k} ...] [--use-shaka-packager] [-M format=mkv] [{additional_args}]
+```
+
+A real example with default settings looks like this:
+
+```bash
+N_m3u8DL-RE "https://example.com/manifest.mpd" --key a1b2c3d4e5f6a1b2:c3d4e5f6a1b2c3d4 -M format=mkv
+```
+
+When request headers were captured alongside the manifest, they are included as `-H` flags:
+
+```bash
+N_m3u8DL-RE "https://example.com/manifest.mpd" \
+  -H "User-Agent: Mozilla/5.0 ..." \
+  -H "Origin: https://example.com" \
+  --key a1b2c3d4e5f6a1b2:c3d4e5f6a1b2c3d4 \
+  -M format=mkv
+```
+
+## The `buildCommand` Function
+
+```js
+buildCommand(entry, settings, manifestIndex)
+```
+
+| Parameter | Type | Description |
+|---|---|---|
+| `entry` | `object` | A stored key entry containing `keys`, `manifests`, `url`, `title`, and `pssh_data` |
+| `settings` | `object` | The full `chrome.storage.sync` settings object (exe name, packager choice, quote style, save-name mode, additional args) |
+| `manifestIndex` | `number` | Zero-based index into `entry.manifests`; defaults to `0` if omitted or out of range |
+
+The function is **pure** — it does not read from storage itself and has no side effects. The popup and history page call it whenever a manifest dropdown changes or a setting is updated.
+
+## Configuring the Command
+
+Open **Command Options** in the popup (the section is collapsible; it defaults to collapsed). The settings below are persisted in `chrome.storage.sync` and apply to every entry in the popup and history page simultaneously.
+
+### Downloader Name
+
+The **Downloader Name** text field controls the executable name placed at the start of the command (`{exe}`). It defaults to `N_m3u8DL-RE` when left blank. Replace it with any tool name or absolute path:
+
+```bash
+# Default
+N_m3u8DL-RE "https://example.com/manifest.mpd" --key ... -M format=mkv
+
+# Custom
+/usr/local/bin/yt-dlp "https://example.com/manifest.mpd" --key ...
+```
+
+### Packager
+
+Choose which decryption backend the command targets:
+
+<CodeGroup>
+
+```bash mp4decrypt (default)
+N_m3u8DL-RE "https://example.com/manifest.mpd" \
+  --key a1b2c3d4e5f6a1b2:c3d4e5f6a1b2c3d4 \
+  -M format=mkv
+```
+
+```bash shaka-packager
+N_m3u8DL-RE "https://example.com/manifest.mpd" \
+  --key a1b2c3d4e5f6a1b2:c3d4e5f6a1b2c3d4 \
+  --use-shaka-packager \
+  -M format=mkv
+```
+
+</CodeGroup>
+
+Selecting **shaka-packager** appends the `--use-shaka-packager` flag. The `mp4decrypt` option (default) omits it entirely.
+
+### Quotes
+
+Choose the quoting style for the manifest URL and header values:
+
+| Option | Style | Suitable for |
+|---|---|---|
+| **cmd** (default) | Double quotes `"…"` | Windows Command Prompt / PowerShell |
+| **bash** | Single quotes `'…'` | Linux / macOS shells |
+
+Single-quote mode applies POSIX escaping: any literal `'` inside a value is replaced with `'\''`.
+
+### Save Name
+
+Control whether `--save-name` is appended to the command:
+
+| Option | Behaviour |
+|---|---|
+| **None** (default) | No `--save-name` argument; the downloader picks its own output filename |
+| **From Title** | Uses the page `document.title`, sanitised for filesystem safety |
+| **From URL** | Derives a name from the last path segment of the page URL, stripped of its extension and sanitised |
+
+The sanitisation step removes control characters, Windows-reserved characters (`< > : " / \ | ? *`), collapses whitespace, trims leading/trailing junk, and caps the result at 120 characters. Reserved filenames (`CON`, `NUL`, `COM1`, etc.) are prefixed with `_`.
+
+### Additional Args
+
+The **Additional Args** text field is appended verbatim to the end of the command. When this field is non-empty it **replaces** the default `-M format=mkv` suffix — the format flag is only added automatically when no additional args are present.
+
+```bash
+# No additional args → -M format=mkv appended automatically
+N_m3u8DL-RE "https://example.com/manifest.mpd" --key ... -M format=mkv
+
+# With additional args → your text replaces the format flag
+N_m3u8DL-RE "https://example.com/manifest.mpd" --key ... --threads 8 --tmp-dir /tmp
+```
+
+## Selecting a Manifest URL
+
+When multiple manifests were detected for an entry (for example, both a DASH MPD and an HLS playlist), the expanded entry shows a **Manifest** dropdown. The label for each option is formatted as `{TYPE} · {url}` (e.g., `DASH · https://example.com/manifest.mpd`). Selecting a different option immediately regenerates the **Command** field to use that manifest's URL and its associated request headers.
+
+The manifest index passed to `buildCommand` corresponds directly to the selected dropdown position (zero-based).
+
+## How Manifests Are Detected
+
+The extension proxies `XMLHttpRequest.prototype.send` and `window.fetch` in the page's main world. After each response completes, it inspects the response body for manifest signatures:
+
+| Signature | Format |
+|---|---|
+| Response body contains `<MPD` | DASH |
+| Response body contains `#EXTM3U` | HLS |
+| Response body contains `<SmoothStreamingMedia` | MSS |
+
+When a match is found, the manifest URL is stored and associated with the current tab's page URL. At key extraction time, all manifests collected for that page URL are attached to the key entry.
+
+<Info>
+  Manifest detection works for both XHR and `fetch`-based requests, and handles all XHR response types: `text`, `json`, `arraybuffer`, `blob`, and `document`. Only the first occurrence of each unique URL is stored — duplicates are deduplicated automatically.
+</Info>
+
+## How Request Headers Are Captured
+
+Request headers for manifest URLs are captured by the background service worker using `chrome.webRequest.onBeforeSendHeaders`. Before the manifest request leaves the browser, the background script strips several noisy or security-sensitive headers and forwards the remainder to the content script:
+
+**Stripped headers:**
+- All headers starting with `sec-ch-ua` (client hints)
+- All headers starting with `Sec-Fetch`
+- All headers starting with `Accept-`
+- `Host`
+- `Connection`
+
+The remaining headers (such as `User-Agent`, `Origin`, `Referer`, `Cookie`, and any custom auth headers set by the page) are stored alongside the manifest URL and included as `-H` flags in the generated command.
+
+<Warning>
+  Header capture relies on `chrome.webRequest.onBeforeSendHeaders` with `EXTRA_HEADERS` permission. In Firefox, the set of exposed headers may differ slightly from Chrome. If a required header is missing from the generated command, check the request in the browser's network DevTools and add it manually via the **Additional Args** field.
+</Warning>

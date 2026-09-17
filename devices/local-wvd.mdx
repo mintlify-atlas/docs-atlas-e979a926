@@ -1,0 +1,118 @@
+---
+title: "Load a Local Widevine Device (.wvd) File"
+sidebarTitle: "Local WVD"
+description: "Learn what a .wvd device file contains, how to obtain or create one, and how to load it into WidevineProxy2 for local key extraction."
+---
+
+A Widevine Device file (`.wvd`) is a binary container that bundles two pieces of private credential material: a device RSA private key and a client ID blob. Together these allow WidevineProxy2 to re-sign license challenges on behalf of a real device, so the license server issues keys that the extension can then extract. Because the `.wvd` holds a genuine private key, it is the most direct and self-contained way to operate the extension — everything runs inside the browser with no external server required.
+
+## Obtaining a .wvd File
+
+<CardGroup cols={2}>
+  <Card title="Dump Your Own Device" icon="mobile" href="https://forum.videohelp.com/threads/408031">
+    Follow the VideoHelp forum guide to extract the private key and client ID blob directly from an Android device you own.
+  </Card>
+  <Card title="Ready-to-Use Devices" icon="download" href="https://forum.videohelp.com/forums/48">
+    The VideoHelp forum hosts a collection of community-shared Widevine Device files you can download and use immediately.
+  </Card>
+</CardGroup>
+
+## Creating a .wvd from Raw Files
+
+If you have run the dump procedure and ended up with two separate files — `device_private_key` and `device_client_id_blob` — you need to package them into the `.wvd` format before the extension can read them. The [`pywidevine`](https://github.com/devine-dl/pywidevine) command-line tool handles this in a single step:
+
+```bash
+pywidevine create-device -k device_private_key -c device_client_id_blob -t "ANDROID" -l 3
+```
+
+| Flag | Value | Meaning |
+|------|-------|---------|
+| `-k` | `device_private_key` | Path to the raw RSA private key file |
+| `-c` | `device_client_id_blob` | Path to the raw client identification blob |
+| `-t` | `"ANDROID"` | Device type — matches the `deviceType` value `2` used internally |
+| `-l` | `3` | Security level (L3 is the software-based tier) |
+
+The command produces a `.wvd` file in the current directory, named after the key's embedded device information.
+
+<Note>
+  Security level 3 (L3) indicates a software-only Widevine implementation. Hardware-backed L1 devices require a physical device with a Trusted Execution Environment and cannot be emulated in software.
+</Note>
+
+## Loading the .wvd Into the Extension
+
+<Steps>
+  <Step title="Open the Extension Popup">
+    Click the WidevineProxy2 icon in your browser toolbar to open the popup window.
+  </Step>
+  <Step title="Select the Widevine Device Mode">
+    In the popup, select the **Widevine Device** radio button to switch the device type to local WVD mode.
+  </Step>
+  <Step title="Open the File Picker">
+    Click the device dropdown and choose **+ Choose File**. A small file-picker page will open in a new window.
+  </Step>
+  <Step title="Select Your .wvd File">
+    In the file-picker window, click **Choose File**, then navigate to your `.wvd` file in the system file dialog and confirm your selection.
+  </Step>
+  <Step title="Confirm the Import">
+    The window closes automatically once the file has been read. The device now appears in the dropdown, selected and ready to use.
+  </Step>
+</Steps>
+
+## How the Extension Stores the Device
+
+When a `.wvd` file is imported, the extension converts the binary content to a Base64 string and writes it into `chrome.storage.sync`. The storage key is the filename with the `.wvd` extension stripped; a separate `devices` array keeps track of every loaded device name, and `selected` records the active choice.
+
+```js
+// Simplified from src/picker/wvd/filePicker.js
+const b64 = toBase64(await file.arrayBuffer());
+const name = file.name.replace(/\.wvd$/i, "");
+
+chrome.storage.sync.get(null, (s) => {
+  const devices = (s.devices || []).filter((n) => n !== name);
+  devices.push(name);
+  chrome.storage.sync.set(
+    { [name]: b64, devices, selected: name },
+    () => window.close()
+  );
+});
+```
+
+The `devices` array acts as a manifest — the popup reads it to populate the dropdown, and the same list drives device removal. The Base64 payload is decoded back to binary at challenge time.
+
+## Device Management
+
+<AccordionGroup>
+  <Accordion title="Switching Between Devices">
+    Open the popup and use the dropdown to select any previously loaded device. The `selected` key in `chrome.storage.sync` is updated immediately and takes effect for the next license challenge.
+  </Accordion>
+  <Accordion title="Removing a Device">
+    Select the device in the dropdown and click the remove button. The extension deletes the Base64 payload key and removes the name from the `devices` array in `chrome.storage.sync`.
+  </Accordion>
+</AccordionGroup>
+
+## How Challenges Are Re-Signed
+
+When a Widevine license challenge is intercepted, the `Session` class in `src/library/main/session.js` decodes the incoming `SignedMessage` protobuf, replaces the client identification with the one from the loaded `.wvd`, and re-signs the `LicenseRequest` with the device's RSA private key using PSS/SHA-1:
+
+```js
+// From src/library/main/session.js — getLicenseChallenge()
+const pss = forge.pss.create({
+  md: forge.md.sha1.create(),
+  mgf: forge.mgf.mgf1.create(forge.md.sha1.create()),
+  saltLength: 20
+});
+
+const md = forge.md.sha1.create();
+md.update(Util.utf8.decode(this._licenseRequest), "raw");
+
+signedMessage.msg = this._licenseRequest;
+signedMessage.signature = Util.utf8.encode(
+  this._devicePrivateKey.sign(md, pss)
+);
+```
+
+The request ID embedded in the challenge differs depending on the device type. When `deviceType === 2` (ANDROID), the ID is generated as a hex-encoded random 4-byte prefix followed by a fixed suffix (`000000000100000000000000`). For all other device types a plain 16-byte random value is used instead.
+
+<Warning>
+  Storing a device private key in `chrome.storage.sync` means it is synced to your Google or Firefox account if sync is enabled. Anyone with access to your browser profile or account can extract the key. Consider disabling browser sync for extension data if you are handling a sensitive device file.
+</Warning>

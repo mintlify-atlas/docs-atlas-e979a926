@@ -1,0 +1,221 @@
+---
+title: "Connect to a Remote CDM Server for Key Extraction"
+sidebarTitle: "Remote CDM"
+description: "Configure WidevineProxy2 to delegate signing operations to a pywidevine-compatible HTTP server instead of storing a device private key locally."
+---
+
+A Remote CDM is a pywidevine-compatible HTTP server that holds a Widevine device and performs all cryptographic signing operations on its behalf. Instead of embedding a private key in the browser, WidevineProxy2 forwards the intercepted init data to the remote server, which constructs and signs the license challenge. The signed challenge is returned to the extension, sent to the license endpoint, and the resulting license is forwarded back to the server for key derivation — keeping the device private key off the machine running the browser entirely.
+
+## The remote.json Configuration File
+
+All connection parameters for a Remote CDM are bundled in a single `remote.json` file. Every field is required; the extension parses this file at import time and derives the display name from it.
+
+```json
+{
+  "host": "https://cdm.example.com",
+  "secret": "your-api-secret",
+  "device_name": "pixel_3a",
+  "security_level": 3,
+  "system_id": 12345
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `host` | string | Full base URL of the pywidevine CDM server, including scheme. Trailing slashes are stripped automatically. |
+| `secret` | string | Shared secret passed as the `X-Secret-Key` header on every request to authenticate the caller. |
+| `device_name` | string | Name of the device as registered on the remote server; used as a path segment in every API call. |
+| `security_level` | number | Widevine security level of the remote device (e.g. `3` for L3). Shown in the display name only. |
+| `system_id` | number | Widevine system ID of the device. Shown in the display name only. |
+
+Once imported, the CDM is stored in `chrome.storage.sync` under a display name composed from these fields:
+
+```
+{device_name} (L{security_level}/{system_id}) @ {hostname}
+```
+
+For example, `pixel_3a (L3/12345) @ cdm.example.com`.
+
+## Loading the remote.json Into the Extension
+
+<Steps>
+  <Step title="Open the Extension Popup">
+    Click the WidevineProxy2 icon in your browser toolbar to open the popup window.
+  </Step>
+  <Step title="Select Remote CDM Mode">
+    In the popup, select the **Remote CDM** radio button to switch the device type to remote mode.
+  </Step>
+  <Step title="Open the File Picker">
+    Click the device dropdown and choose **+ Choose File**. A small file-picker page will open in a new window.
+  </Step>
+  <Step title="Select Your remote.json File">
+    In the file-picker window, click **Choose File**, navigate to your `remote.json` file in the system file dialog, and confirm your selection. If the JSON is invalid, an error message is displayed in the picker window.
+  </Step>
+  <Step title="Confirm the Import">
+    The window closes automatically once the file has been validated and saved. The CDM now appears in the dropdown under its display name, selected and ready to use.
+  </Step>
+</Steps>
+
+## Remote CDM API Endpoints
+
+The extension communicates with the pywidevine server through six endpoints during the lifecycle of a single license exchange. All requests include the `X-Secret-Key` header for authentication.
+
+<Note>
+  The `X-Secret-Key` header must match the `secret` field in your `remote.json` exactly. Requests with a missing or incorrect secret are rejected by the server with a non-200 status code, which causes the extension to throw an error and abort the license flow.
+</Note>
+
+<AccordionGroup>
+  <Accordion title="Open Session — GET /{device_name}/open">
+    Opens a new CDM session on the remote server and returns a `session_id` that must be included in every subsequent request.
+
+    **Response:**
+    ```json
+    {
+      "data": {
+        "session_id": "abc123..."
+      }
+    }
+    ```
+  </Accordion>
+
+  <Accordion title="Set Service Certificate — POST /{device_name}/set_service_certificate">
+    Optionally provides a service certificate to the remote session, enabling privacy mode (encrypted client identification). This step is skipped when no server certificate is present.
+
+    **Request body:**
+    ```json
+    {
+      "session_id": "abc123...",
+      "certificate": "<base64-encoded certificate>"
+    }
+    ```
+  </Accordion>
+
+  <Accordion title="Get License Challenge — POST /{device_name}/get_license_challenge/STREAMING">
+    Sends the intercepted init data to the server. The server constructs a signed `LicenseRequest` protobuf and returns it as a Base64 string.
+
+    **Request body:**
+    ```json
+    {
+      "session_id": "abc123...",
+      "init_data": "<base64-encoded PSSH init data>",
+      "privacy_mode": true
+    }
+    ```
+
+    **Response:**
+    ```json
+    {
+      "data": {
+        "challenge_b64": "<base64-encoded signed LicenseRequest>"
+      }
+    }
+    ```
+  </Accordion>
+
+  <Accordion title="Parse License — POST /{device_name}/parse_license">
+    Delivers the raw license response from the streaming service back to the server for key derivation.
+
+    **Request body:**
+    ```json
+    {
+      "session_id": "abc123...",
+      "license_message": "<base64-encoded license response>"
+    }
+    ```
+  </Accordion>
+
+  <Accordion title="Get Keys — POST /{device_name}/get_keys/CONTENT">
+    Retrieves the derived content decryption keys after the license has been parsed.
+
+    **Request body:**
+    ```json
+    {
+      "session_id": "abc123..."
+    }
+    ```
+
+    **Response:**
+    ```json
+    {
+      "data": {
+        "keys": [
+          { "key_id": "aabbccdd...", "key": "11223344..." }
+        ]
+      }
+    }
+    ```
+  </Accordion>
+
+  <Accordion title="Close Session — GET /{device_name}/close/{session_id}">
+    Cleans up the session on the server. Called automatically by the extension after keys have been retrieved, regardless of success or failure of the key-fetch step.
+  </Accordion>
+</AccordionGroup>
+
+## How the Extension Uses the API
+
+The `RemoteCdm` class in `src/library/background/remote_cdm.js` orchestrates the full session lifecycle. `RemoteCdm.open()` is a static factory that calls the `/open` endpoint and constructs a session object; all subsequent calls use the returned `session_id`:
+
+```js
+// Simplified from src/library/background/remote_cdm.js
+static async open(host, secret, deviceName) {
+  const trimmedHost = host.replace(/\/+$/, "");
+  const openResponse = await fetch(`${trimmedHost}/${deviceName}/open`, {
+    method: "GET",
+    headers: { "X-Secret-Key": secret }
+  });
+  const responseJson = await openResponse.json();
+  return new RemoteCdm(responseJson.data.session_id, trimmedHost, secret, deviceName);
+}
+```
+
+After the server parses the license, the extension immediately fetches the derived keys and then closes the session in a single `parseLicense` call:
+
+```js
+// Simplified from src/library/background/remote_cdm.js — parseLicense()
+async parseLicense(licenseB64) {
+  await fetch(`${this.host}/${this.deviceName}/parse_license`, {
+    method: "POST",
+    headers: { "content-type": "application/json", "X-Secret-Key": this.secret },
+    body: JSON.stringify({ session_id: this.sessionId, license_message: licenseB64 })
+  });
+
+  const keysResponse = await fetch(`${this.host}/${this.deviceName}/get_keys/CONTENT`, {
+    method: "POST",
+    headers: { "content-type": "application/json", "X-Secret-Key": this.secret },
+    body: JSON.stringify({ session_id: this.sessionId })
+  });
+
+  const { keys } = (await keysResponse.json()).data;
+
+  // Cleanup — fire and forget
+  await fetch(`${this.host}/${this.deviceName}/close/${this.sessionId}`, {
+    method: "GET",
+    headers: { "X-Secret-Key": this.secret }
+  });
+
+  return keys.map(({ key, key_id }) => ({ k: key, kid: key_id }));
+}
+```
+
+## Storage Details
+
+The full CDM object from `remote.json` is stored as a JSON value in `chrome.storage.sync`, keyed by the display name string. A separate `remote_cdms` array tracks all loaded remote CDMs, and `selected_remote_cdm` records the active one — mirroring the same pattern used for local `.wvd` files.
+
+```js
+// Simplified from src/picker/remote/filePicker.js
+const cdm = JSON.parse(await file.text());
+const name = displayName(cdm); // e.g. "pixel_3a (L3/12345) @ cdm.example.com"
+
+chrome.storage.sync.set(
+  { [name]: cdm, remote_cdms: remotes, selected_remote_cdm: name },
+  () => window.close()
+);
+```
+
+<Warning>
+  **Property proxy mode is not compatible with Remote CDM.** If your current proxy mode is set to `property`, the extension will not be able to intercept challenges correctly when a Remote CDM is selected. Switch the proxy mode to `event` (the default) in the extension settings before using a Remote CDM.
+</Warning>
+
+<Tip>
+  If the remote server is running on a machine that is only reachable over a local network or VPN, make sure the `host` URL in your `remote.json` resolves correctly from the machine running the browser — not just from the server itself.
+</Tip>

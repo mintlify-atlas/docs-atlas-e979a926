@@ -1,0 +1,124 @@
+---
+title: "Proxy Modes: Event vs Property Challenge Interception"
+sidebarTitle: "Proxy Modes"
+description: "Compare the event and property challenge interception strategies, when to switch modes, and why property mode is incompatible with Remote CDM sessions."
+---
+
+When WidevineProxy2 intercepts a Widevine license challenge, it must replace the outgoing message before the web player's own listener forwards it to the license server. Two distinct strategies exist for doing this: **event mode** (the default) and **property mode**. Both modes operate inside `interceptChallenge` in `page_eme.js`, but they differ fundamentally in how the modified challenge buffer is handed back to the player.
+
+## How Each Mode Works
+
+### Event Mode (Default)
+
+In `event` mode the extension stops the original `MediaKeyMessageEvent` entirely and fires a brand-new one in its place. When the re-signed challenge is ready, the extension:
+
+1. Calls `e.stopImmediatePropagation()` so no other listener on the same session receives the original event.
+2. Calls `e.preventDefault()` to suppress any default browser handling.
+3. Constructs a cloned `MediaKeyMessageEvent` carrying the new challenge buffer.
+4. Dispatches the cloned event back on the `MediaKeySession` target — the player's registered listener picks it up naturally.
+
+Because the dispatched event re-enters the listener pipeline, `interceptChallenge` returns `true` to signal that the original callback should **not** also be called.
+
+### Property Mode
+
+In `property` mode the original event object is kept alive and forwarded as-is. Instead of suppressing and re-dispatching, the extension calls `Object.defineProperty` on the event to replace the `message` accessor in-place:
+
+```js
+Object.defineProperty(e, "message", {
+  configurable: true,
+  get: () => new Uint8Array(newChallenge).buffer
+});
+```
+
+The player's listener then receives the same event object it already had, but every time it reads `e.message` it gets the re-signed buffer. No re-dispatch occurs and `interceptChallenge` returns `undefined`, allowing the original callback to continue.
+
+## Code Excerpt — `interceptChallenge` Branch
+
+The following is the relevant branching logic from `page_eme.js`:
+
+```js
+if (settings.proxy_mode === "property") {
+    Object.defineProperty(e, "message", {
+        configurable: true,
+        get: () => new Uint8Array(newChallenge).buffer
+    });
+} else if (settings.proxy_mode === "event") {
+    const clonedEvent = new MediaKeyMessageEvent("message", {
+        messageType: e.messageType,
+        message: new Uint8Array(newChallenge).buffer
+    });
+
+    e.stopImmediatePropagation();
+    e.preventDefault();
+
+    _thisTarget.dispatchEvent(clonedEvent);
+    return true;
+    // true = we stop here because the dispatched event above will trigger the handler on its own
+}
+```
+
+## Comparison
+
+| | `event` (default) | `property` |
+|---|---|---|
+| **Original event** | Stopped and discarded | Passed through unchanged |
+| **Challenge delivery** | New `MediaKeyMessageEvent` dispatched | `message` getter overridden in-place |
+| **`stopImmediatePropagation`** | Yes | No |
+| **Re-dispatch required** | Yes | No |
+| **Async-safe** | Yes | Yes (synchronous property set) |
+| **Works with Remote CDM** | ✅ Yes | ❌ No |
+| **Works with wrapped listeners** | Sometimes | Usually |
+
+## When to Switch to Property Mode
+
+Most players work correctly with `event` mode. Switch to `property` mode when all of the following are true:
+
+- The **Challenge** indicator is active (green) in the DRM status display.
+- The **License** indicator is absent (grey) — meaning the server never received a valid challenge.
+- Keys are not appearing in the popup.
+
+Some players wrap `addEventListener` in a way that prevents a freshly dispatched event from reaching the inner callback. In that scenario `event` mode's re-dispatched clone goes unhandled, whereas `property` mode's in-place substitution is seen directly by the existing listener.
+
+<Tip>
+  The DRM status display in the popup shows five pipeline steps. If **Challenge** is green but **License** is grey, the extension intercepted the challenge but the re-signed event never reached the server — try switching to `property` mode.
+</Tip>
+
+## Incompatibility with Remote CDM
+
+<Warning>
+  **Property mode does not work with Remote CDM.** Remote CDM challenge generation is asynchronous — the extension must await a network round-trip to the remote server before it has a new challenge buffer to set. By the time that `await` resolves, the synchronous event dispatch has already completed and setting the `message` property has no effect. For this reason, the popup automatically reverts `proxy_mode` to `"event"` whenever Remote CDM is selected, and disables the `property` radio button to prevent an impossible combination.
+</Warning>
+
+The `applyCompat` function in `popup.js` enforces this constraint at the UI level:
+
+```js
+// Resolve a stored impossible combo (Remote CDM + Property): drop Property.
+if (remoteSelect.checked && proxyProperty.checked) {
+    setProxyMode("event");
+    saveSync({ proxy_mode: "event" });
+}
+const disableProperty = remoteSelect.checked; // Remote selected -> no Property
+const disableRemote = proxyProperty.checked;  // Property selected -> no Remote
+```
+
+If a stored settings combination of Remote CDM + `property` mode is ever loaded (for example after manually editing storage), the popup will silently correct it by writing `proxy_mode: "event"` back to `chrome.storage.sync`.
+
+## Changing the Proxy Mode
+
+<Steps>
+  <Step title="Open the extension popup">
+    Click the WidevineProxy2 icon in the browser toolbar.
+  </Step>
+  <Step title="Locate the Proxy Mode radio buttons">
+    The **Proxy Mode** section contains two options: **Event** and **Property**.
+  </Step>
+  <Step title="Select Property">
+    Click **Property**. The setting is saved to `chrome.storage.sync` immediately — no page reload is required.
+  </Step>
+  <Step title="Reload the target page">
+    Reload the DRM-protected page and attempt playback again. Check whether the **License** indicator turns green.
+  </Step>
+  <Step title="Revert if still broken">
+    If keys are still missing, switch back to **Event** and open a bug report with the full DRM status display state.
+  </Step>
+</Steps>

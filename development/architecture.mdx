@@ -1,0 +1,268 @@
+---
+title: "WidevineProxy2 Extension Architecture: Script Worlds"
+sidebarTitle: "Architecture"
+description: "Detailed breakdown of the three script worlds, cross-context message flow, key classes, and crypto stack that power EME interception and key extraction."
+---
+
+WidevineProxy2 is composed of three isolated JavaScript contexts that run simultaneously on every page — a background service worker, an isolated-world content script, and a main-world page script. Each context has a strictly defined role: the main world touches the page's EME API, the isolated world bridges to the extension, and the background worker manages CDM sessions and storage. Understanding how these layers interact explains how a Widevine challenge originating in the browser player ends up as a set of decrypted content keys stored in `chrome.storage.local`.
+
+## Script Worlds at a Glance
+
+<CardGroup cols={3}>
+  <Card title="Background Service Worker" icon="server">
+    **`library/background/bundle.min.js`**
+
+    Registers content scripts via `chrome.scripting`, manages `RemoteCdm` session state in memory, intercepts request headers for manifest URL correlation, flashes the toolbar icon red on key capture, and polls for outdated versions every 12 hours.
+  </Card>
+  <Card title="Isolated World Content Script" icon="shield">
+    **`library/isolated/bundle.min.js`**
+
+    Runs in the extension's isolated JavaScript context on every frame. Bridges `CustomEvent` messages between the main world and the background, stores captured keys in `chrome.storage.local`, and relays `REMOTE_*` calls to the background service worker.
+  </Card>
+  <Card title="Main World Script" icon="code">
+    **`library/main/bundle.min.js`**
+
+    Injected into the page's own JavaScript context. Proxies the entire EME API surface and `XMLHttpRequest`/`fetch` for manifest detection. Contains the pure-JS `Session` and `RemoteCdm` implementations and emits all `CustomEvent` messages consumed by the isolated world.
+  </Card>
+</CardGroup>
+
+## Background Service Worker
+
+The service worker (`background.js` bundled into `bundle.min.js`) is the only context with access to privileged Chrome extension APIs. It has no access to page DOM or page JavaScript.
+
+### Content Script Registration
+
+On install, startup, and any `chrome.storage.sync` change, the background calls `ensureScriptsRegistered()`. This function reads the `enabled` and `selected` keys from sync storage. If the extension is enabled and a device is selected, both content scripts are registered (or updated) via `chrome.scripting.registerContentScripts`:
+
+```javascript
+const SCRIPT_CONFIGS = [
+    {
+        id: "WVP2_ISOLATED",
+        js: ["library/isolated/bundle.min.js"],
+        world: "ISOLATED",
+        runAt: "document_start",
+        allFrames: true,
+        matchOriginAsFallback: true,
+        persistAcrossSessions: true,
+    },
+    {
+        id: "WVP2_MAIN",
+        js: ["library/main/bundle.min.js"],
+        world: "MAIN",
+        runAt: "document_start",
+        allFrames: true,
+        matchOriginAsFallback: true,
+        persistAcrossSessions: true,
+    }
+];
+```
+
+If the extension is disabled or no device is loaded, `unregisterContentScripts` removes both scripts. The `persistAcrossSessions: true` flag means Chrome remembers the registration across browser restarts without needing to re-register on every `onStartup` event.
+
+### RemoteCdm Session Management
+
+When the device type is `REMOTE`, the main world cannot directly call the CDM API because cross-origin network requests from page context are disallowed. Instead, the background worker acts as a proxy. It maintains an in-memory `Map` of active sessions:
+
+```javascript
+const remoteCdmSessions = new Map(); // sessionId → RemoteCdm instance
+```
+
+The background handles four `REMOTE_*` message types:
+
+| Message type | Action |
+|---|---|
+| `REMOTE_OPEN` | Reads device config from `chrome.storage.sync`, calls `RemoteCdm.open()`, stores the instance, returns `sessionId` |
+| `REMOTE_SET_SERVICE_CERTIFICATE` | Looks up the session by ID, calls `cdm.setServiceCertificate(certificate)` |
+| `REMOTE_GET_CHALLENGE` | Calls `cdm.getLicenseChallenge(initData, privacyMode)`, returns base64-encoded challenge |
+| `REMOTE_PARSE` | Calls `cdm.parseLicense(license)`, deletes the session from the map, returns extracted keys |
+
+### Manifest Header Interception
+
+The background listens on `webRequest.onBeforeSendHeaders` for all URLs and tab requests. For each GET request it strips browser-internal headers (`sec-ch-ua`, `Sec-Fetch-*`, `Accept-*`, `Host`, `Connection`) and sends the remaining headers to the active tab via `chrome.tabs.sendMessage` as a `MANIFEST_HEADERS` message. The isolated world accumulates these headers so that when keys are emitted, the stored key entry includes the original request headers for the detected manifest URL.
+
+### Toolbar Icon State
+
+Whenever a new key is added to `chrome.storage.local` (detected by watching `storage.onChanged` for entries where `oldValue === undefined`), the icon is set to the red variant for 60 seconds:
+
+```javascript
+await chrome.action.setIcon({
+    path: { 16: "../../images/icon-16-red.png", ... }
+});
+```
+
+### Version Check
+
+On startup (with a 1-second delay to avoid blocking), the background fetches `https://github.com/DevLARLEY/WidevineProxy2/releases/latest`, extracts the version from the redirect URL, and sets the `isOutdated` flag if the numeric comparison shows a newer version. This check repeats every 12 hours. The popup queries this flag via the `IS_OUTDATED` message type.
+
+## Isolated World Content Script
+
+The isolated world script (`storage.js` bundled into `bundle.min.js`) runs in the browser's isolated extension context on every frame. It cannot access page JavaScript variables but can fire and receive `CustomEvent` messages on `document`.
+
+### CustomEvent Bridge
+
+The main world emits requests as `__ext_response` events on `document`. The isolated world listens for these events, dispatches the request to the registered handler, and fires the result back as `__ext_responseReceived`:
+
+```javascript
+document.addEventListener('__ext_response', async (event) => {
+    const { type, body, requestId } = event.detail;
+    const handler = handlers.get(type);
+    const responseBody = await handler(body);
+    document.dispatchEvent(new CustomEvent('__ext_responseReceived', {
+        detail: { requestId, body: responseBody, error }
+    }));
+});
+```
+
+<Note>
+Firefox on Android requires `structuredClone(event.detail)` before destructuring the event payload because the cross-context object proxy behaves differently there.
+</Note>
+
+### Message Handlers Registered in the Isolated World
+
+| Event type | Handler behavior |
+|---|---|
+| `SETTINGS` | Reads `selected`, `proxy_mode`, `device_type`, and device data from `chrome.storage.sync`; deserializes `.wvd` binary if type is `WVD` |
+| `KEYS` | Attaches known manifest URLs and headers, then writes the key entry to `chrome.storage.local` keyed by `pssh_data` |
+| `MANIFEST_URL` | Accumulates manifest URLs seen on the current tab URL |
+| `REMOTE_OPEN / SET_SERVICE_CERTIFICATE / GET_CHALLENGE / PARSE` | Relayed to background via `chrome.runtime.sendMessage` and the response forwarded back |
+| `EME_CREATE_MEDIA_KEYS / CREATE_SESSION / GENERATE_REQUEST / LICENSE_REQUEST / LICENSE` | Forwarded to background as `EME_STATUS_REACTIVE`; also sent to the popup on demand via `EME_STATUS_ACTIVE` |
+
+## Main World Script
+
+The main world script runs in exactly the same JavaScript context as the web player. This is the only way to intercept and modify EME API calls before the browser's internal DRM machinery processes them.
+
+### EME API Proxying
+
+Every relevant EME method is wrapped with `Util.proxy()`, a helper that replaces the method on the prototype with a `Proxy` object whose `apply` trap intercepts all calls:
+
+```javascript
+Util.proxy(MediaKeys.prototype, "createSession", (_target, _this, _args) => {
+    return Util.logEme("EME_CREATE_SESSION", _args, () => {
+        const result = _target.apply(_this, _args);
+        sessionMediaKeysMap.set(result, _this);
+        return result;
+    });
+});
+```
+
+The proxied methods and their purposes:
+
+| Method | What the proxy does |
+|---|---|
+| `MediaKeySystemAccess.createMediaKeys` | Emits `EME_CREATE_MEDIA_KEYS` status event |
+| `MediaKeys.setServerCertificate` | Logs cert metadata, stores cert bytes in `mediaKeysServerCertMap` |
+| `MediaKeys.createSession` | Emits `EME_CREATE_SESSION`, maps session → MediaKeys instance |
+| `MediaKeySession.generateRequest` | Emits `EME_GENERATE_REQUEST` status event |
+| `MediaKeySession.addEventListener` | Wraps the `message` listener with `wrapListener` for challenge interception |
+| `MediaKeySession.update` | Calls `parseClearKeyResponse` or `parseWidevineChallenge` on the license bytes |
+
+### Challenge Interception
+
+When a player adds a `message` event listener, `wrapListener` wraps it in a new `Proxy`. When the `MediaKeyMessageEvent` fires:
+
+1. **`interceptChallenge`** is called. It checks that the event is a real `MediaKeyMessageEvent` with `byteLength > 2`.
+2. The challenge bytes are passed to `resignChallenge`:
+   - If the bytes parse as JSON → ClearKey, no re-signing needed.
+   - If `device_type === "WVD"` → `getWidevineChallengeLocal()` creates a `Session`, calls `getLicenseChallenge()`, returns the re-signed bytes.
+   - If `device_type === "REMOTE"` → `getLicenseChallengeRemote()` emits `REMOTE_OPEN` → `REMOTE_SET_SERVICE_CERTIFICATE` (if applicable) → `REMOTE_GET_CHALLENGE`, returning the CDM-signed challenge bytes.
+3. The modified challenge replaces the original in one of two ways depending on `proxy_mode`:
+   - **`event` mode**: The original event is suppressed with `stopImmediatePropagation()` and a new `MediaKeyMessageEvent` carrying the new challenge bytes is dispatched.
+   - **`property` mode**: A getter is defined on the event object via `Object.defineProperty` so reading `e.message` returns the replaced bytes without re-dispatching.
+
+### Manifest Detection
+
+`page_web.js` proxies `XMLHttpRequest.prototype.send` and `window.fetch`. After each response completes, it calls `Util.getManifestType(body)` on the response text. If the body looks like an HLS or DASH manifest, a `MANIFEST_URL` event is emitted with the URL and timestamp. The isolated world accumulates these entries and later attaches them to key entries so the popup can display the stream URL alongside the keys.
+
+## Message Flow End-to-End
+
+The following describes the complete path from a player requesting a license to keys appearing in the popup:
+
+1. **Player calls `MediaKeySession.generateRequest(initDataType, initData)`** — the main world proxy emits `EME_GENERATE_REQUEST` to the isolated world.
+2. **Player adds a `message` listener** — `addEventListener` proxy wraps it with `wrapListener`.
+3. **Browser fires `MediaKeyMessageEvent`** — `interceptChallenge` runs; the original challenge bytes are extracted.
+4. **Challenge is re-signed** — either locally via `Session.getLicenseChallenge()` (WVD path) or remotely via `REMOTE_GET_CHALLENGE` → background → `RemoteCdm` HTTP call.
+5. **Modified challenge reaches the player** — dispatched as a new event (event mode) or returned via property getter (property mode).
+6. **Player sends the modified challenge to the license server** — this is the native browser network request; the extension does not touch it.
+7. **Player receives the license response and calls `MediaKeySession.update(license)`** — the `update` proxy intercepts the license bytes.
+8. **License is parsed**:
+   - If ClearKey: `parseClearKeyResponse` decodes the JSON `keys` array.
+   - If Widevine WVD: `session.parseLicense(licenseBytes)` decrypts key containers using AES-CBC.
+   - If Widevine Remote: `REMOTE_PARSE` message → background → `cdm.parseLicense()`.
+9. **`KEYS` event emitted** — isolated world handler attaches manifest context and writes to `chrome.storage.local`.
+10. **Background detects the new storage entry** — sets toolbar icon to red for 60 seconds.
+11. **Popup reacts to `chrome.storage.onChanged`** — displays the keys in the UI.
+
+```text
+Player                Main World          Isolated World      Background
+  │                      │                     │                  │
+  ├─generateRequest()──► │                     │                  │
+  │                      ├──EME_GENERATE_REQ──►│                  │
+  ├─addEventListener()──►│                     │                  │
+  │                      │  (wraps listener)   │                  │
+  │◄──MediaKeyMessage────┤                     │                  │
+  │                      │ interceptChallenge  │                  │
+  │              [REMOTE]│──REMOTE_OPEN───────►│──sendMessage───►│
+  │                      │◄──sessionId─────────│◄────────────────│
+  │                      │──REMOTE_GET_CHALL──►│──sendMessage───►│
+  │                      │◄──challenge─────────│◄────────────────│
+  │◄──new challenge───── │                     │                  │
+  ├─(sends to server)    │                     │                  │
+  ├─update(license)─────►│                     │                  │
+  │                      │ parseLicense/       │                  │
+  │                      │ REMOTE_PARSE        │                  │
+  │                      ├──KEYS──────────────►│                  │
+  │                      │              storage.local.set()       │
+  │                      │                     │──onChanged──────►│
+  │                      │                     │           setIcon(red)
+```
+
+## Key Classes
+
+<Accordion title="Session — pure-JS Widevine client">
+Defined in `src/library/main/session.js`. Accepts a device private key (RSA PEM), a `ClientIdentification` protobuf blob, and the device type (Android = `2`, Generic = other).
+
+**`getLicenseChallenge(messageBytes, encryptClientId)`** — Decodes the `SignedMessage` from the browser's native challenge, strips the existing client identity, injects the device's `ClientIdentification` (optionally encrypted with the service certificate via RSA-OAEP + AES-CBC), generates a fresh `requestId`, and re-signs the `LicenseRequest` using **RSA-PSS with SHA-1 and 20-byte salt** using the device private key.
+
+**`parseLicense(licenseBytes)`** — Decrypts the `session_key` field with the device private key (RSA-OAEP / SHA-1), derives the AES encryption key and HMAC authentication key using **AES-CMAC** over `"ENCRYPTION\x00" + licenseRequest` and `"AUTHENTICATION\x00" + licenseRequest`, verifies the license signature with HMAC-SHA256, then decrypts each `Content Key` container with AES-CBC.
+
+**`_encryptClientIdentification()`** — Implements Widevine privacy mode: encrypts the `ClientIdentification` protobuf with a random 16-byte AES-CBC key, then encrypts that key with the service provider's RSA-OAEP public key extracted from the `DrmCertificate`.
+
+**`_verifyServiceCertificate()`** — Verifies the `SignedDrmCertificate` signature against the hard-coded Widevine root public key using RSA-PSS / SHA-1.
+</Accordion>
+
+<Accordion title="RemoteCdm — HTTP client for pywidevine-compatible APIs">
+Defined in `src/library/background/remote_cdm.js`. Manages a single CDM session against a remote pywidevine server.
+
+**`RemoteCdm.open(host, secret, deviceName)`** — POSTs to `{host}/open` with the `X-Secret-Key` header, receives a `session_id`, and returns a new `RemoteCdm` instance.
+
+**`setServiceCertificate(certificateB64)`** — POSTs the base64-encoded certificate to `{host}/set_service_certificate`.
+
+**`getLicenseChallenge(initDataB64, privacyMode)`** — POSTs PSSH init data to `{host}/get_license_challenge`, returns the base64-encoded signed challenge to be forwarded to the license server.
+
+**`parseLicense(licenseB64)`** — POSTs the base64-encoded license response to `{host}/parse_license`, returns the decrypted key objects. Also closes the server-side session.
+</Accordion>
+
+<Accordion title="Util — shared helper library">
+Defined separately in `src/library/main/util.js` and `src/library/isolated/util.js`.
+
+- **`Util.b64.encode(bytes)` / `Util.b64.decode(str)`** — Base64 encode/decode operating on `Uint8Array`.
+- **`Util.utf8.encode(str)` / `Util.utf8.decode(bytes)`** — UTF-8 encode/decode.
+- **`Util.proxy(target, method, handler)`** — Replaces `target[method]` with a `Proxy` whose `apply` trap calls `handler(_target, _this, _args)`.
+- **`Util.emit(type, body)`** — Dispatches a `__ext_response` `CustomEvent` from the main world and returns a `Promise` that resolves when `__ext_responseReceived` fires with the matching `requestId`.
+- **`Util.getManifestType(body)`** — Checks if a string looks like an HLS (`.m3u8` / `#EXTM3U`) or DASH (`.mpd` / `<MPD`) manifest.
+- **`Util.readWidevineDevice(raw)`** — Deserializes a `.wvd` binary blob into `{ privateKey, clientId, deviceType }`.
+</Accordion>
+
+## Cryptographic Stack
+
+| Algorithm | Library | Where used |
+|---|---|---|
+| RSA-PSS (SHA-1, salt=20) | `forge` | Re-signing `LicenseRequest` in `Session.getLicenseChallenge` |
+| RSA-OAEP (SHA-1) | `forge` | Decrypting `session_key` in `Session.parseLicense`; encrypting AES key in `_encryptClientIdentification` |
+| AES-CBC (128-bit) | `forge` | Decrypting `Content Key` containers; encrypting `ClientIdentification` for privacy mode |
+| AES-CMAC | `cmac.js` | Deriving encryption and authentication keys from `session_key` during license parsing |
+| HMAC-SHA256 | `forge` | Verifying the license message authentication code |
+| SHA-1 | `forge` | Digest used in RSA-PSS/OAEP operations |
+| Protobuf | `protobuf.js` | Encoding/decoding all Widevine protobuf messages (`license_protocol.proto`) |
+
+The `forge` library is bundled as `forge.min.js` inside the main world bundle. The compiled protobuf descriptor is `license_protocol.min.js`, generated from the `license_protocol.proto` schema.

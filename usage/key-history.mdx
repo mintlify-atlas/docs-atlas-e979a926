@@ -1,0 +1,120 @@
+---
+title: "Browsing and Managing the Full Key Capture History"
+sidebarTitle: "Key History"
+description: "Open the history page to search, filter, export, and delete every key entry ever captured — not just those from the last five minutes."
+---
+
+The extension popup's **Keys** section is intentionally scoped to recent captures — only entries from the last five minutes are displayed there. Every entry the extension has ever captured, across all sessions and all pages, lives in `chrome.storage.local` and is accessible at any time through the dedicated history page. The history page is a full-featured browser tab with search, type filtering, bulk export, and per-entry deletion.
+
+## Opening the History Page
+
+<Steps>
+  <Step title="Open the extension popup">
+    Click the WidevineProxy2 toolbar icon to open the popup. The **History** button sits in the top-right area of the popup, adjacent to the Keys section header.
+  </Step>
+
+  <Step title="Click History">
+    Clicking **History** calls `chrome.tabs.create({ url: chrome.runtime.getURL("ui/history.html") })` and closes the popup. A new tab opens inside the extension's own origin, loaded with all entries from `chrome.storage.local`.
+  </Step>
+
+  <Step title="Review the entry count">
+    The top of the history page shows a summary line such as **"42 entries stored"**. This reflects the total number of key sets in storage, regardless of age or type.
+  </Step>
+
+  <Step title="Search and filter">
+    Use the search box to narrow entries by any text that appears in the URL, PSSH data, key values, or manifest URLs. The result count updates live as you type. Use the **type filter** buttons (All, DASH, HLS, MSS) to restrict entries by manifest type.
+  </Step>
+
+  <Step title="Expand an entry">
+    Click any entry header to expand it. Each entry shows:
+    - **URL** — the page where the keys were captured
+    - **DRM type badge** — `WIDEVINE` or `CLEARKEY`
+    - **Timestamp** — formatted as `YYYY-MM-DD HH:MM`
+    - **PSSH** — the base64-encoded PSSH data (read-only input with a **copy** button)
+    - **Keys** — a dropdown of all `kid:key` hex pairs with a **copy** button that outputs them as `--key` arguments
+    - **Manifest** — a dropdown of all detected manifest URLs; selecting one updates the download command
+    - **Command** — the auto-generated download command for the selected manifest
+  </Step>
+
+  <Step title="Delete an entry">
+    Each entry header includes a **trash icon**. Clicking it calls `chrome.storage.local.remove(pssh)` and immediately removes the entry from the list. The total count updates to reflect the deletion.
+  </Step>
+</Steps>
+
+## Searching the History
+
+The search box filters entries in real time using the `searchText()` function, which concatenates the following fields into a single lowercase string before matching:
+
+```js
+const parts = [entry.url, entry.pssh_data, entry.type];
+manifests(entry).forEach((m) => {
+    parts.push(m.url, m.type);
+});
+return parts.concat(keyLines(entry)).filter(Boolean).join(" ").toLowerCase();
+```
+
+This means a single query can match against: the page URL, the PSSH hex string, the DRM type label, all manifest URLs and their type labels, and all `kid:key` values simultaneously. Searching for a partial key value, a domain name, or a PSSH fragment all work without any special syntax.
+
+## Filtering by Manifest Type
+
+Buttons above the entry list let you restrict results to a specific manifest type:
+
+| Button | Matches |
+|---|---|
+| **All** | Every stored entry regardless of manifest type |
+| **DASH** | Entries whose first manifest URL is identified as DASH (contains `mpd` or `dash`) |
+| **HLS** | Entries whose first manifest URL is identified as HLS (contains `m3u8` or `hls`) |
+| **MSS** | Entries whose first manifest URL is identified as Smooth Streaming (contains `ism`, `smooth`, or `mss`) |
+
+<Note>
+  The type filter is based on the **first** manifest URL attached to the entry. Entries without any detected manifest are shown under **All** but not under any specific type filter.
+</Note>
+
+## Exporting and Clearing All Entries
+
+<CardGroup cols={2}>
+  <Card title="Export All" icon="download">
+    The **Export All** button serialises the entire `chrome.storage.local` map as JSON and triggers a download named `widevineproxy2-keys.json`. The file contains every entry verbatim, including PSSH, keys, manifests, timestamps, and URLs.
+  </Card>
+  <Card title="Clear All" icon="trash">
+    The **Clear All** button calls `chrome.storage.local.clear()` after a browser confirmation dialog. This is irreversible — all stored entries are permanently deleted. The button is disabled (no-op) when the history is already empty.
+  </Card>
+</CardGroup>
+
+## Storage Details
+
+<Accordion title="How entries are stored and keyed">
+  Every captured key set is written to `chrome.storage.local` with the PSSH data string as its key:
+
+  ```js
+  await chrome.storage.local.set({ [data.pssh_data]: data });
+  ```
+
+  Each value object contains:
+
+  | Field | Type | Description |
+  |---|---|---|
+  | `pssh_data` | `string` | Base64-encoded PSSH; also used as the storage key |
+  | `keys` | `array` | Array of `{ kid, k }` objects (hex strings) |
+  | `type` | `string` | `"WIDEVINE"` or `"CLEARKEY"` |
+  | `url` | `string` | Page URL at capture time |
+  | `title` | `string` | `document.title` at capture time |
+  | `timestamp` | `number` | Unix milliseconds at capture time |
+  | `manifests` | `array` | Array of `{ type, url, headers }` objects (if detected) |
+
+  If two sessions on the same page produce the same PSSH, the second write silently overwrites the first, since the storage key is identical.
+</Accordion>
+
+<Accordion title="Popup vs. history page: the 5-minute filter">
+  The popup applies a recency filter before rendering:
+
+  ```js
+  const recentKeys = list.filter(e => (now - e.timestamp) / 1_000 <= 5 * 60);
+  ```
+
+  The history page loads the full `chrome.storage.local` map without any timestamp filter. There is no data loss — entries older than five minutes are simply not shown in the popup until you open the history page.
+</Accordion>
+
+## Live Updates
+
+The history page stays in sync while open. An `onChanged` listener on `chrome.storage` triggers a full reload of the entry list whenever a new key is captured or an entry is deleted from another context (such as the popup). Settings changes (dark mode, etc.) are also applied live without requiring a page reload.

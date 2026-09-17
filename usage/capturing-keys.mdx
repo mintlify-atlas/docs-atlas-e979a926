@@ -1,0 +1,91 @@
+---
+title: "Capturing Widevine and ClearKey Decryption Keys Live"
+sidebarTitle: "Capturing Keys"
+description: "Learn how the extension intercepts EME license exchanges, parses Widevine and ClearKey responses, and surfaces decryption keys in the popup."
+---
+
+When a browser tab plays DRM-protected video, the page calls the Encrypted Media Extensions (EME) API to negotiate a license with the DRM server. WidevineProxy2 proxies every step of that negotiation — substituting your Widevine device's identity for the browser's built-in one, forwarding the modified challenge to the license endpoint, then decoding the response to extract the raw decryption keys. The whole process happens transparently in the background; you only need to open the extension popup to see the results.
+
+## Prerequisites
+
+Before attempting to capture keys, make sure the following conditions are met:
+
+<CardGroup cols={2}>
+  <Card title="Extension Installed" icon="puzzle-piece">
+    The extension must be installed in Chrome (via Developer Mode) or Firefox (persistent or temporary). See the installation guide for step-by-step instructions.
+  </Card>
+  <Card title="Device Loaded and Enabled" icon="microchip">
+    At least one Widevine Device (`.wvd` file) or Remote CDM (`remote.json`) must be loaded in the popup and the toggle must be in the **enabled** state.
+  </Card>
+</CardGroup>
+
+## Capture Workflow
+
+<Steps>
+  <Step title="Open the target page">
+    Navigate to any website that serves DRM-protected video. Common examples include streaming services that use Widevine or ClearKey for their content.
+  </Step>
+
+  <Step title="Start video playback">
+    Press play on the video. The page will call `MediaKeySystemAccess.createMediaKeys()`, create a session, generate a license request, and send a challenge to the license endpoint. WidevineProxy2 intercepts the `MediaKeyMessageEvent` at the point the challenge is fired and replaces it with a challenge signed by your Widevine device.
+  </Step>
+
+  <Step title="Open the extension popup">
+    Click the WidevineProxy2 icon in your browser toolbar. The **Keys** section at the bottom of the popup will display entries for every key set captured in the last five minutes.
+  </Step>
+
+  <Step title="Review the captured entry">
+    Each entry in the Keys list shows:
+    - **Page URL** — the `window.location.href` at the time of capture
+    - **DRM type badge** — `WIDEVINE` or `CLEARKEY`
+    - **Key count chip** — the number of `kid:key` pairs in the entry
+
+    Click the entry header (or press **Enter**/**Space**) to expand it and reveal the full details.
+  </Step>
+
+  <Step title="Inspect the expanded entry">
+    The expanded view contains:
+    - **PSSH** — the base64-encoded Protection System Specific Header used as the storage key in `chrome.storage.local`
+    - **Keys** — a dropdown listing every `kid:key` hex pair; click **copy** to copy all keys formatted as `--key` arguments
+    - **Manifest** — if a streaming manifest was detected, a dropdown lets you choose among multiple manifest URLs (DASH, HLS, MSS)
+    - **Command** — an auto-generated download command ready to paste into a terminal
+  </Step>
+</Steps>
+
+## How Keys Are Parsed
+
+### Widevine
+
+The extension intercepts `MediaKeySession.update()` calls after the license server's response reaches the browser. It decodes the raw bytes as a protobuf `SignedMessage`. If the message type is `LICENSE`, it decodes the inner `License` message and calls `session.parseLicense()` to decrypt each key container using the session's derived session key. The resulting `kid:key` hex pairs are stored in `chrome.storage.local`.
+
+For **Remote CDM** sessions the final parse step is delegated to the remote server via `REMOTE_PARSE`, which returns the same `kid:key` format.
+
+### ClearKey
+
+ClearKey license responses are JSON objects. The extension decodes the UTF-8 response, parses the JSON, and converts each `kid` and `k` field from base64url (with `+`/`/` padding correction) to hex using `forge.util.bytesToHex`. The resulting pairs are stored in the same format as Widevine keys.
+
+```js
+const decodeKey = (value) => {
+    const paddedB64 = value.replace(/-/g, "+").replace(/_/g, "/") + "==";
+    const keyBytes = Util.b64.decode(paddedB64);
+    return forge.util.bytesToHex(keyBytes);
+};
+```
+
+## Storage and Recency
+
+Keys are written to `chrome.storage.local` keyed by `pssh_data`:
+
+```js
+await chrome.storage.local.set({ [data.pssh_data]: data });
+```
+
+Each stored entry contains: `keys`, `pssh_data`, `timestamp`, `type` (`WIDEVINE` or `CLEARKEY`), `url`, `title`, and any detected `manifests`.
+
+<Note>
+  The popup **Keys** section only shows entries captured within the **last 5 minutes** (`(now - e.timestamp) / 1_000 <= 5 * 60`). To browse the complete capture history across all sessions, click the **History** button in the popup to open the full history page in a new tab.
+</Note>
+
+## Icon Indicator
+
+When a new key entry is written to storage, the extension icon turns **red** for 60 seconds as a visual confirmation. The icon reverts to normal automatically after the timeout, or when the browser suspends the service worker.

@@ -1,0 +1,95 @@
+---
+title: "Reading the Live DRM Status Indicator in the Popup"
+sidebarTitle: "DRM Status"
+description: "Understand the five EME pipeline stages shown in the popup status bar and use the debug table to diagnose why keys may not appear."
+---
+
+The WidevineProxy2 popup includes a live DRM status bar that shows which stages of the Encrypted Media Extensions (EME) pipeline have fired on the currently active tab. Each indicator lights up as the page progresses through the key exchange, making it straightforward to confirm that the extension is actively intercepting the session — or to pinpoint exactly where things have gone wrong when keys do not appear.
+
+## The Five EME Pipeline Steps
+
+The status bar reflects five internal message types emitted by the injected content script. Each step maps to a specific EME API call or event.
+
+<Steps>
+  <Step title="MediaKeys">
+    **Activated by:** `MediaKeySystemAccess.createMediaKeys()` being called.
+
+    This is the earliest observable DRM signal. The page has successfully selected a key system (e.g., `com.widevine.alpha`) and asked the browser to create a `MediaKeys` object. Seeing this indicator active confirms that the page is attempting to use DRM at all — the proxy is hooked into `MediaKeySystemAccess.prototype.createMediaKeys`.
+  </Step>
+
+  <Step title="Session">
+    **Activated by:** `MediaKeys.createSession()` being called.
+
+    The page has created a `MediaKeySession` object, which will be used to manage the lifecycle of one set of decryption keys. The proxy hooks `MediaKeys.prototype.createSession` and records the session-to-`MediaKeys` relationship so server certificates can be resolved later.
+  </Step>
+
+  <Step title="Generated">
+    **Activated by:** `MediaKeySession.generateRequest()` being called.
+
+    The session has generated a license request from the content's init data (typically the PSSH box). This triggers the `message` event on the session, which carries the raw challenge bytes. The proxy hooks `MediaKeySession.prototype.generateRequest`.
+  </Step>
+
+  <Step title="Challenge">
+    **Activated by:** A `MediaKeyMessageEvent` occurring with `.message.byteLength > 2`.
+
+    The raw challenge message has been emitted. The extension intercepts the `message` event on `MediaKeySession`, verifies that the message is non-trivial (more than 2 bytes), and — if the challenge passes — resignes it using your Widevine device before allowing it to propagate to the page's license request handler.
+
+    <Note>
+      A challenge with `.message.byteLength <= 2` is silently ignored. This guards against empty or malformed messages that some implementations emit during session setup.
+    </Note>
+  </Step>
+
+  <Step title="License">
+    **Activated by:** `MediaKeySession.update()` being called with a `SignedMessage` of type `LICENSE`.
+
+    The license server's response has arrived and the page is feeding it into the session. The proxy intercepts `MediaKeySession.prototype.update`, attempts to decode the bytes as a protobuf `SignedMessage`, and — if it is a `LICENSE` type — extracts the decryption keys. This is the step that actually produces the `kid:key` pairs visible in the Keys section.
+  </Step>
+</Steps>
+
+## Status Indicator States
+
+Each step cell in the DRM status bar can be in one of three visual states:
+
+| State | Appearance | Meaning |
+|---|---|---|
+| **Pending** | Grey / unlit | The EME event has not fired yet on this tab |
+| **OK** | Green | The step completed successfully |
+| **Failed** | Red | The step fired but encountered an error |
+
+Hovering over a cell shows a tooltip with the step name, its success/failure state, and any arguments or error message captured at that point.
+
+## Issue Debug Table
+
+If keys do not appear or the video does not play, compare your observed combination of **Keys appear**, **Video plays**, and the **Challenge / License** indicator states against the table below.
+
+| Keys appear | Video plays | Challenge | License | Possible cause | Possible fix |
+|---|---|---|---|---|---|
+| No | Yes | ⬜ inactive | ⬜ inactive | The page does not use DRM | No action needed |
+| No | Yes | 🟢 active | ⬜ inactive | Unable to intercept license messages | Try **property** proxy mode; open an issue if it persists |
+| No | No | ⬜ inactive | ⬜ inactive | Unknown — likely unrelated to the extension | Investigate page errors independently |
+| No | No | 🟢 active | ⬜ inactive | License endpoint rejects Android CDMs | Use WidevineProxy2 on Android, or configure a Chrome Remote CDM |
+
+<Tip>
+  The debug table does not cover every possible scenario, but it accurately identifies the most common failure modes. The critical signal is whether **Challenge** is active: if it is not, the page either does not use DRM or the extension scripts are not injecting correctly.
+</Tip>
+
+## Diagnosing "Endpoint Rejects Android CDMs"
+
+When **Challenge** is active but **License** never fires and video playback fails, the license server has rejected the challenge because it does not accept Android-class Widevine devices. Two options are available:
+
+<CardGroup cols={2}>
+  <Card title="Use an Android Device" icon="mobile">
+    Run WidevineProxy2 on a physical Android device or emulator running Chrome/Firefox. Android devices present a higher-security CDM profile that some endpoints require.
+  </Card>
+  <Card title="Switch to Chrome Remote CDM" icon="server">
+    Configure a Remote CDM entry that connects to a Chrome-based CDM server. In the popup, select **Remote CDM** as your device type and load a `remote.json` pointing to your Chrome CDM host.
+  </Card>
+</CardGroup>
+
+<Warning>
+  **Property** proxy mode is incompatible with Remote CDM. The popup enforces this constraint automatically — selecting one disables the other. If you switch to a Remote CDM to resolve an endpoint rejection, the proxy mode will be forced back to **event**.
+</Warning>
+
+## Healthy Interception at a Glance
+
+A fully successful DRM interception progresses through all five steps in order: **MediaKeys → Session → Generated → Challenge → License**. When all five are green in the status bar and a key entry appears in the Keys section, the extension has successfully extracted the decryption keys for that content.

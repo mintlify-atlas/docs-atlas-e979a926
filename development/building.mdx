@@ -1,0 +1,178 @@
+---
+title: "Building and Packaging WidevineProxy2 From Source"
+sidebarTitle: "Building"
+description: "Step-by-step guide to installing dependencies, bundling scripts, packaging browser artifacts, and loading the extension locally for development."
+---
+
+WidevineProxy2 uses a straightforward Node.js build pipeline. Source scripts are bundled and minified by four independent build scripts, then optionally packaged into browser-ready artifacts. You do not need to publish an artifact to test local changes — loading the `src/` directory directly into Chrome or Firefox works after a single bundle step.
+
+## Prerequisites
+
+Before building, make sure the following are installed on your system:
+
+- **Node.js** (v18 or later recommended)
+- **npm** (bundled with Node.js)
+
+No global npm packages are required. All tooling (`terser`, `web-ext`, `archiver`) is installed locally as dev-dependencies.
+
+## Install Dependencies
+
+Clone the repository and install dev-dependencies:
+
+```bash
+npm install
+```
+
+This installs the three dev-dependencies declared in `package.json`:
+
+| Package | Purpose |
+|---------|---------|
+| `terser` | Minifies the four source bundles |
+| `web-ext` | Signs and packages the Firefox XPI |
+| `archiver` | Creates the Chrome ZIP |
+
+## npm Scripts
+
+### `npm run bundle`
+
+Runs all four build scripts in sequence:
+
+```bash
+npm run bundle
+```
+
+This executes:
+
+```bash
+node src/library/background/build.js
+node src/library/isolated/build.js
+node src/library/main/build.js
+node src/ui/build.js
+```
+
+Each build script concatenates its source files and writes a minified output bundle:
+
+| Build script | Output bundle |
+|---|---|
+| `src/library/background/build.js` | `src/library/background/bundle.min.js` |
+| `src/library/isolated/build.js` | `src/library/isolated/bundle.min.js` |
+| `src/library/main/build.js` | `src/library/main/bundle.min.js` |
+| `src/ui/build.js` | `src/ui/bundle.min.js` |
+
+### `npm run package [chrome|firefox|both]`
+
+Packages previously built bundles into distributable artifacts under `artifacts/`:
+
+```bash
+# Package for both browsers (default)
+npm run package
+
+# Package for Chrome only
+npm run package -- chrome
+
+# Package for Firefox only
+npm run package -- firefox
+```
+
+<Warning>
+This command requires the bundles to be present. Always run `npm run bundle` before `npm run package`, or use `npm run publish` which does both.
+</Warning>
+
+Source-only build files are excluded from the artifact so the shipped package contains only runtime code. The following files are stripped from the output:
+
+```text
+library/background/build.js      library/main/cmac.js
+library/background/background.js library/main/forge.min.js
+library/background/remote_cdm.js library/main/license_protocol.min.js
+library/isolated/build.js        library/main/page_eme.js
+library/isolated/storage.js      library/main/page_web.js
+library/isolated/util.js         library/main/protobuf.min.js
+library/main/build.js            library/main/session.js
+library/main/util.js             ui/build.js
+ui/history.js                    ui/popup.js
+ui/icons.js                      ui/keys-render.js
+```
+
+### `npm run publish`
+
+Runs `bundle` followed by `package` in a single command:
+
+```bash
+npm run publish
+```
+
+This is the recommended command for cutting a release. It accepts no arguments and targets both browsers.
+
+## Firefox Signing Setup
+
+Firefox requires a signed XPI produced via the Mozilla Add-ons API. Before running any package step that targets Firefox, create a `.env` file in the repository root:
+
+```ini
+API_KEY=your_mozilla_api_key
+API_SECRET=your_mozilla_api_secret
+```
+
+Obtain these credentials from the [Mozilla Add-on Developer Hub](https://addons.mozilla.org/en-US/developers/addon/api/key/). The XPI is signed as an **unlisted** add-on, meaning it does not go through public review.
+
+## Output Artifacts
+
+After packaging, distributable files are written to the `artifacts/` directory. The version number is read from `src/manifest.json` at build time.
+
+| Browser | Artifact |
+|---------|---------|
+| Chrome | `artifacts/WidevineProxy2-{version}.zip` |
+| Firefox | `artifacts/WidevineProxy2-{version}.xpi` |
+
+## Full Publish Workflow
+
+<Steps>
+  <Step title="Install dependencies">
+    ```bash
+    npm install
+    ```
+  </Step>
+  <Step title="Create .env for Firefox (if targeting Firefox)">
+    ```ini
+    API_KEY=your_mozilla_api_key
+    API_SECRET=your_mozilla_api_secret
+    ```
+    Save this file as `.env` in the repository root.
+  </Step>
+  <Step title="Run the publish command">
+    ```bash
+    npm run publish
+    ```
+    This bundles all four scripts then packages artifacts for both browsers.
+  </Step>
+  <Step title="Locate the artifacts">
+    Find the output files in `artifacts/`:
+    - `WidevineProxy2-{version}.zip` — drag into `chrome://extensions`
+    - `WidevineProxy2-{version}.xpi` — install via `about:addons`
+  </Step>
+</Steps>
+
+## Loading Locally After Bundling
+
+After running `npm run bundle`, you can load the extension directly from the `src/` directory without packaging. This is the fastest way to test changes during development.
+
+<Tabs>
+  <Tab title="Chrome">
+    1. Navigate to `chrome://extensions/`
+    2. Enable **Developer mode** (toggle in the top-right corner)
+    3. Click **Load unpacked**
+    4. Select the `src/` directory from the repository root
+
+    Changes to source files require re-running `npm run bundle` and clicking the reload icon on the extension card.
+  </Tab>
+  <Tab title="Firefox">
+    1. Navigate to `about:debugging#/runtime/this-firefox`
+    2. Click **Load Temporary Add-on...**
+    3. Select any file inside the `src/` directory (e.g. `src/manifest.json`)
+
+    Temporary add-ons are removed when the browser restarts. Re-running `npm run bundle` and reloading the add-on in `about:debugging` applies updates.
+
+    <Note>
+      Temporary loading in Firefox does not require Mozilla signing credentials. The `.env` file is only needed when running `npm run package -- firefox` or `npm run publish`.
+    </Note>
+  </Tab>
+</Tabs>

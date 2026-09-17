@@ -1,0 +1,201 @@
+---
+title: "Widevine Service Certificate and Privacy Mode Encryption"
+sidebarTitle: "Service Certificate"
+description: "Learn how WidevineProxy2 handles Widevine service certificates to optionally encrypt the client identity before it reaches the license server."
+---
+
+A Widevine **service certificate** is a `SignedDrmCertificate` issued by the license server that contains the server's RSA public key and a provider ID. When privacy mode is active, the extension uses this certificate to encrypt the `ClientIdentification` protobuf before embedding it in the license challenge — this is called `EncryptedClientIdentification`. The result is that the license server sees an opaque blob rather than a plaintext device fingerprint, providing a layer of device privacy.
+
+## The Two Settings
+
+WidevineProxy2 exposes two options for service certificate usage, controlled by the `server_cert` key in `chrome.storage.sync`:
+
+<CardGroup cols={2}>
+  <Card title="Never (Default)" icon="lock-open">
+    `server_cert: false` — The `ClientIdentification` protobuf is always embedded in plaintext inside the license challenge, regardless of whether a service certificate was received. This is the default and works with the vast majority of license servers.
+  </Card>
+  <Card title="When Used" icon="lock">
+    `server_cert: true` — If a service certificate has been received (via either delivery mechanism described below), the client ID is encrypted before the challenge is sent. If no certificate is available, the extension falls back to sending the plaintext client ID.
+  </Card>
+</CardGroup>
+
+<Note>
+  Enable **When Used** only if the license server explicitly requires privacy mode. Most public streaming services function correctly with plaintext client identifiers.
+</Note>
+
+## How the Extension Receives a Service Certificate
+
+A service certificate can arrive through two different EME pathways. WidevineProxy2 monitors both.
+
+### Via `MediaKeys.setServerCertificate()`
+
+The web player may proactively push a certificate by calling `setServerCertificate()` on the `MediaKeys` object. The extension proxies this method and stores the certificate in `mediaKeysServerCertMap`, keyed by the `MediaKeys` instance:
+
+```js
+Util.proxy(MediaKeys.prototype, "setServerCertificate", async (_target, _this, _args) => {
+    console.log("[WVP2]", frameId, "Server Cert (setServerCertificate):", parseServerCert(_args[0]));
+    const result = await _target.apply(_this, _args);
+    mediaKeysServerCertMap.set(_this, new Uint8Array(_args[0]));
+    return result;
+});
+```
+
+### Via a `SERVICE_CERTIFICATE` Message Event
+
+Some servers request the certificate dynamically by responding to the initial `generateRequest` with a `SignedMessage` of type `SERVICE_CERTIFICATE`. When `parseWidevineChallenge` decodes the server's response and detects this message type, it stores the certificate in `sessionServerCertMap`, keyed by the `MediaKeySession`:
+
+```js
+} else if (signedMessage.type === SignedMessage.MessageType.SERVICE_CERTIFICATE) {
+    const serverCert = new Uint8Array(signedMessage.msg);
+    console.log("[WVP2]", frameId, "Server Cert (message):", parseServerCert(serverCert));
+    sessionServerCertMap.set(mediaKeySession, serverCert);
+}
+```
+
+### Certificate Lookup at Challenge Time
+
+Before re-signing a challenge, `getServerCert` checks both maps and returns whichever certificate is available:
+
+```js
+const getServerCert = (_this) => {
+    const mediaKeys = sessionMediaKeysMap.get(_this);
+    if (mediaKeys) {
+        const serverCert = mediaKeysServerCertMap.get(mediaKeys);
+        if (serverCert) {
+            return serverCert;
+        }
+    }
+    return sessionServerCertMap.get(_this);
+}
+```
+
+The `mediaKeysServerCertMap` entry (set via `setServerCertificate`) takes priority. If that is absent, the session-level certificate from a `SERVICE_CERTIFICATE` message is used.
+
+## Certificate Verification
+
+Before a service certificate is trusted, `_verifyServiceCertificate` verifies the signature against the hardcoded Widevine root public key using RSA-PSS with SHA-1:
+
+```js
+_verifyServiceCertificate(signedServiceCertificate) {
+    const pss = forge.pss.create({
+        md: forge.md.sha1.create(),
+        mgf: forge.mgf.mgf1.create(forge.md.sha1.create()),
+        saltLength: 20
+    });
+
+    const sha1 = forge.md.sha1.create();
+    sha1.update(
+        Util.utf8.decode(signedServiceCertificate.drmCertificate),
+        "raw"
+    );
+
+    const publicKey = forge.pki.publicKeyFromAsn1(
+        forge.asn1.fromDer(
+            Util.utf8.decode(WIDEVINE_ROOT_PUBLIC_KEY)
+        )
+    );
+
+    return publicKey.verify(
+        sha1.digest().bytes(),
+        Util.utf8.decode(signedServiceCertificate.signature),
+        pss
+    );
+}
+```
+
+If verification fails, `setServiceCertificate` throws `"Service certificate is not signed by the Widevine root certificate"` and the certificate is rejected.
+
+## The Encryption Process
+
+<Accordion title="How EncryptedClientIdentification is constructed">
+
+When `server_cert` is `true` and a verified certificate is available, `_encryptClientIdentification` produces an `EncryptedClientIdentification` message through a two-layer encryption scheme:
+
+**Step 1 — Encode the client identity**
+
+The `ClientIdentification` protobuf is serialised to binary with `ClientIdentification.encode(...).finish()`.
+
+**Step 2 — AES-CBC encrypt with a random session key**
+
+A random 16-byte AES key and a random 16-byte IV are generated. The serialised client ID bytes are encrypted with AES-CBC:
+
+```js
+const key = forge.random.getBytesSync(16);
+const iv  = forge.random.getBytesSync(16);
+
+const cipher = forge.cipher.createCipher("AES-CBC", key);
+cipher.start({ iv });
+cipher.update(forge.util.createBuffer(
+    ClientIdentification.encode(clientIdentification).finish()
+));
+cipher.finish();
+const rawEncryptedClientIdentification = Util.utf8.encode(cipher.output.data);
+```
+
+**Step 3 — RSA-OAEP wrap the AES key**
+
+The service certificate's RSA public key (extracted from the `DrmCertificate` protobuf) encrypts the random AES key using RSA-OAEP with SHA-1:
+
+```js
+const publicKey = forge.pki.publicKeyFromAsn1(
+    forge.asn1.fromDer(
+        Util.utf8.decode(serviceCertificate.publicKey)
+    )
+);
+const encryptedKey = publicKey.encrypt(key, "RSA-OAEP", {
+    md: forge.md.sha1.create()
+});
+```
+
+**Step 4 — Assemble the protobuf message**
+
+The final `EncryptedClientIdentification` message bundles all of the above:
+
+```js
+return new EncryptedClientIdentification({
+    encryptedClientId:             rawEncryptedClientIdentification,
+    encryptedClientIdIv:           Util.utf8.encode(iv),
+    encryptedPrivacyKey:           Util.utf8.encode(encryptedKey),
+    providerId:                    serviceCertificate.providerId,
+    serviceCertificateSerialNumber: serviceCertificate.serialNumber
+});
+```
+
+This message replaces the plaintext `clientId` field in the `LicenseRequest` protobuf before the challenge is signed and dispatched.
+
+</Accordion>
+
+## Remote CDM and Privacy Mode
+
+For Remote CDM sessions, the local session object does not handle encryption — instead, the `privacy_mode` flag is forwarded directly to the remote CDM API via the `REMOTE_GET_CHALLENGE` call:
+
+```js
+const challengeB64 = await Util.emit("REMOTE_GET_CHALLENGE", {
+    sessionId: sessionId,
+    initData:  Util.b64.encode(psshData),
+    privacyMode: settings.server_cert
+});
+```
+
+The remote server is responsible for constructing the encrypted challenge. If a service certificate was received locally, it is also forwarded via `REMOTE_SET_SERVICE_CERTIFICATE` before the challenge is requested.
+
+## Enabling or Disabling the Setting
+
+<Steps>
+  <Step title="Open the extension popup">
+    Click the WidevineProxy2 icon in the browser toolbar.
+  </Step>
+  <Step title="Locate the Service Certificate radio buttons">
+    Find the **Service Certificate** section. The two options are **Never** (default) and **When Used**.
+  </Step>
+  <Step title="Select When Used">
+    Click **When Used**. The change is written to `chrome.storage.sync` immediately.
+  </Step>
+  <Step title="Reload the target page">
+    Reload the DRM-protected page. If the license server supplies a service certificate (via either EME pathway), the client ID will be encrypted in subsequent challenges.
+  </Step>
+</Steps>
+
+<Info>
+  When **When Used** is active but no service certificate has been received for the current session, the extension silently falls back to sending the plaintext `ClientIdentification` — no error is thrown and playback continues normally.
+</Info>

@@ -1,0 +1,86 @@
+---
+title: "WidevineProxy2: EME Challenge Interception Extension"
+sidebarTitle: "Introduction"
+description: "Learn how WidevineProxy2 intercepts Widevine and ClearKey EME license challenges, re-signs them with your device key, and extracts decryption keys in real time."
+---
+
+WidevineProxy2 is a Manifest V3 browser extension for Chrome and Firefox that sits between a web player and the browser's Encrypted Media Extensions (EME) API. When a page requests a Widevine or ClearKey DRM license, the extension intercepts the raw challenge before it leaves the browser, re-signs it using your own Widevine device credentials, forwards the modified challenge to the license server, and then parses the server's response to extract the content decryption keys — all transparently, without breaking playback.
+
+<Warning>
+  This extension is intended **solely for educational and research purposes**. Do not use it to decrypt or access content for which you do not hold the legal rights or explicit permission. Unauthorized decryption or distribution of copyrighted material violates applicable laws and intellectual property rights. The developers, contributors, and maintainers of WidevineProxy2 accept no responsibility for any misuse or illegal activities performed with this software. By using this extension, you agree to comply with all applicable laws and regulations governing digital rights and copyright protections.
+</Warning>
+
+## How It Works
+
+WidevineProxy2 operates across three distinct JavaScript execution contexts that the browser keeps strictly isolated from each other:
+
+| World | Script | Role |
+|---|---|---|
+| **Background service worker** | `background.js` | Manages content-script registration via `chrome.scripting`, handles remote CDM session lifecycle, relays messages between page and CDM API, and monitors HTTP traffic for manifest URLs. |
+| **Isolated content script** | `storage.js` | Bridges the MAIN world and the service worker. Handles `SETTINGS`, `KEYS`, `MANIFEST_URL`, and `REMOTE_*` message types; stores extracted keys in `chrome.storage.local`. |
+| **MAIN world script** | `page_eme.js` + `page_web.js` | Runs in the same JavaScript realm as the web page. Proxies `MediaKeySession`, `MediaKeys`, and `MediaKeySystemAccess` to intercept EME events; detects DASH/HLS/MSS manifests via patched `fetch` and `XMLHttpRequest`. |
+
+The MAIN world script wraps `MediaKeySession.addEventListener` so it can intercept the `"message"` event carrying the license challenge. Depending on the selected **proxy mode**, it either clones and re-dispatches the event (`event` mode) or overrides the `message` property in place (`property` mode). After intercepting the challenge, the script calls either the local Widevine device implementation or the remote CDM API to produce a new, correctly signed challenge, then parses the license response that the server returns to recover the decryption keys.
+
+## Supported DRM Systems
+
+- **Widevine** — full challenge re-signing and key extraction using a native JavaScript CDM implementation built on [node-widevine](https://github.com/Frooastside/node-widevine).
+- **ClearKey** — JSON-format license responses are parsed directly; key IDs and key values are decoded from URL-safe Base64 and presented in hex.
+
+## Device Modes
+
+<CardGroup cols={2}>
+  <Card title="Local Widevine Device (.wvd)" icon="hard-drive">
+    Load a `.wvd` file created with `pywidevine`. The private key and client ID blob are read from the file, and all CDM operations run entirely within the extension — no outbound requests to a CDM server are made.
+  </Card>
+  <Card title="Remote CDM API" icon="server">
+    Point the extension at an existing remote CDM server by loading a `remote.json` configuration file. Challenge generation and license parsing are delegated to the remote host. Requires `event` proxy mode.
+  </Card>
+</CardGroup>
+
+## Key Features
+
+<CardGroup cols={2}>
+  <Card title="EME Challenge Interception" icon="shield-halved">
+    Proxies `MediaKeySession` prototype methods and the `message` event listener to capture every Widevine and ClearKey license challenge the page generates, regardless of how the player registers its event handlers.
+  </Card>
+  <Card title="Token, Hash & Wrapping Bypass" icon="lock-open">
+    Because the extension re-signs the challenge with a device key rather than replaying it, one-time tokens, HMAC hashes, and license-wrapping schemes embedded in the challenge are transparently overridden.
+  </Card>
+  <Card title="Manifest Detection (DASH / HLS / MSS)" icon="film">
+    Patches `fetch` and `XMLHttpRequest` in the MAIN world to detect DASH MPD, HLS playlist, and Smooth Streaming manifest responses. Detected URLs are attached to each key entry so you can use them immediately for download commands.
+  </Card>
+  <Card title="Download Command Generation" icon="terminal">
+    The popup's **Command Options** section generates ready-to-run `mp4decrypt` or `shaka-packager` commands for each captured key set, with configurable quote style, executable name, and output filename.
+  </Card>
+</CardGroup>
+
+## Requirements
+
+WidevineProxy2 requires a Widevine device to function. You need at least one of the following:
+
+- A **`.wvd` file** — either dumped from your own Android device ([VideoHelp guide](https://forum.videohelp.com/threads/408031)) or obtained from the [VideoHelp forum](https://forum.videohelp.com/forums/48).
+- A **Remote CDM** — a running instance of a compatible CDM API server, along with its `remote.json` configuration file.
+
+<Note>
+  If you only have a raw `device_client_id_blob` and `device_private_key`, you can convert them into a `.wvd` file with the `pywidevine` CLI:
+
+  ```bash
+  pywidevine create-device \
+    -k device_private_key \
+    -c device_client_id_blob \
+    -t "ANDROID" \
+    -l 3
+  ```
+</Note>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Installation" icon="download" href="/installation">
+    Install the extension in Chrome or Firefox, including persistent and temporary Firefox installation options.
+  </Card>
+  <Card title="Setup" icon="sliders" href="/setup">
+    Configure your Widevine device, choose a proxy mode, and enable the extension before capturing your first keys.
+  </Card>
+</CardGroup>
