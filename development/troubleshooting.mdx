@@ -74,9 +74,11 @@ If the license endpoint only accepts Android CDMs, two options are available:
 </Accordion>
 
 <Accordion title="Property proxy mode reverted to event mode">
-  When the device type is **Remote CDM**, the extension automatically falls back from `property` proxy mode to `event` proxy mode. This happens because property mode requires synchronously replacing `e.message` on the event object, but the Remote CDM path is asynchronous (it must round-trip to the background service worker and then to the remote API).
+  **Remote CDM** and **property** proxy mode cannot be used together. Property mode requires synchronously replacing `e.message` on the event object, but the Remote CDM challenge path is asynchronous — it must round-trip to the background service worker and then to the remote API before a modified challenge is available.
 
-  Event mode is fully compatible with Remote CDM. If you explicitly set `proxy_mode` to `property` for a remote device, the extension reverts to `event` silently. You will see `Intercepted (event/...)` in the console rather than `Intercepted (property/...)`.
+  The popup's `applyCompat()` function enforces this constraint in the UI: selecting Remote CDM disables the property radio button, and selecting property mode disables the Remote CDM radio button. If both settings are somehow stored simultaneously (for example, from a previous version), the popup detects the conflict on load and automatically saves `proxy_mode: "event"` to `chrome.storage.sync`, overwriting the invalid combination.
+
+  Event mode is fully compatible with Remote CDM and is the correct setting to use. You will see `Intercepted (event/...)` in the console when event mode is active.
 </Accordion>
 
 <Accordion title="Extension shows an 'Outdated' warning in the popup">
@@ -119,7 +121,7 @@ Key log messages and what they mean:
 | `[WVP2] [abc123] Intercepted (event/function)` | Challenge intercepted in event proxy mode, listener was a plain function |
 | `[WVP2] [abc123] Intercepted (property/object)` | Challenge intercepted in property proxy mode, listener was an object with `handleEvent` |
 | `[WVP2] [abc123] Server Cert (setServerCertificate): Provider ID: ..., Created: ...` | Service certificate was set; shows provider and creation timestamp |
-| `[WVP2] [abc123] Server Cert (message): ...` | Service certificate delivered via `MediaKeyMessageEvent` of type `service-certificate` |
+| `[WVP2] [abc123] Server Cert (message): ...` | Service certificate received via `MediaKeySession.update()` with a `SignedMessage` of type `SERVICE_CERTIFICATE` |
 
 The **frame ID** in brackets (e.g., `[abc123]`) is generated randomly per-frame at injection time. If a page embeds video in an `<iframe>`, each frame will have a distinct ID, making it easy to trace which frame produced which keys.
 

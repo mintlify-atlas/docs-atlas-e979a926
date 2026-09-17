@@ -8,7 +8,7 @@ The WidevineProxy2 popup includes a live DRM status bar that shows which stages 
 
 ## The Five EME Pipeline Steps
 
-The status bar reflects five internal message types emitted by the injected content script. Each step maps to a specific EME API call or event.
+The status bar reflects five internal message types emitted by the injected content script. Each step maps to a specific EME API call or event and corresponds to one of the `EME_*` message types registered in the isolated script (`EME_CREATE_MEDIA_KEYS`, `EME_CREATE_SESSION`, `EME_GENERATE_REQUEST`, `EME_LICENSE_REQUEST`, `EME_LICENSE`).
 
 <Steps>
   <Step title="MediaKeys">
@@ -32,10 +32,10 @@ The status bar reflects five internal message types emitted by the injected cont
   <Step title="Challenge">
     **Activated by:** A `MediaKeyMessageEvent` occurring with `.message.byteLength > 2`.
 
-    The raw challenge message has been emitted. The extension intercepts the `message` event on `MediaKeySession`, verifies that the message is non-trivial (more than 2 bytes), and — if the challenge passes — resignes it using your Widevine device before allowing it to propagate to the page's license request handler.
+    The raw challenge message has been emitted. The extension intercepts the `message` event on `MediaKeySession`, verifies that the message is non-trivial (more than 2 bytes), and — if the challenge passes — re-signs it using your Widevine device before allowing it to propagate to the page's license request handler.
 
     <Note>
-      A challenge with `.message.byteLength <= 2` is silently ignored. This guards against empty or malformed messages that some implementations emit during session setup.
+      A message with `.message.byteLength <= 2` is silently ignored. This guards against empty or malformed messages that some implementations emit during session setup.
     </Note>
   </Step>
 
@@ -87,7 +87,7 @@ When **Challenge** is active but **License** never fires and video playback fail
 </CardGroup>
 
 <Warning>
-  **Property** proxy mode is incompatible with Remote CDM. The popup enforces this constraint automatically — selecting one disables the other. If you switch to a Remote CDM to resolve an endpoint rejection, the proxy mode will be forced back to **event**.
+  **Property** proxy mode is incompatible with Remote CDM. The popup enforces this automatically — selecting Remote CDM forces the proxy mode back to **event**, and selecting Property mode disables the Remote CDM option. The incompatible control is greyed out with a tooltip explaining the constraint.
 </Warning>
 
 ## Healthy Interception at a Glance

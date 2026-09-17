@@ -187,7 +187,7 @@ async parseLicense(licenseB64) {
 
   const { keys } = (await keysResponse.json()).data;
 
-  // Cleanup — fire and forget
+  // Cleanup — awaited so the caller knows the session was properly closed
   await fetch(`${this.host}/${this.deviceName}/close/${this.sessionId}`, {
     method: "GET",
     headers: { "X-Secret-Key": this.secret }

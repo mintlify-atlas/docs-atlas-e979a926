@@ -10,8 +10,8 @@ Every key entry that includes a detected manifest URL comes with an auto-generat
 
 The command is built by `buildCommand(entry, settings, manifestIndex)` in `keys-render.js`. It assembles positional parts in the following order:
 
-```
-{exe} {manifest_url} [--save-name {name}] [-H {header}: {value} ...] [--key {kid}:{k} ...] [--use-shaka-packager] [-M format=mkv] [{additional_args}]
+```text
+{exe} {manifest_url} [--save-name {name}] [-H {header}: {value} ...] [--key {kid}:{k} ...] [--use-shaka-packager] [-M format=mkv | {additional_args}]
 ```
 
 A real example with default settings looks like this:
@@ -53,11 +53,11 @@ Open **Command Options** in the popup (the section is collapsible; it defaults t
 The **Downloader Name** text field controls the executable name placed at the start of the command (`{exe}`). It defaults to `N_m3u8DL-RE` when left blank. Replace it with any tool name or absolute path:
 
 ```bash
-# Default
+# Default (exe_name is empty or unset)
 N_m3u8DL-RE "https://example.com/manifest.mpd" --key ... -M format=mkv
 
-# Custom
-/usr/local/bin/yt-dlp "https://example.com/manifest.mpd" --key ...
+# Custom path
+/usr/local/bin/N_m3u8DL-RE "https://example.com/manifest.mpd" --key ...
 ```
 
 ### Packager
@@ -98,11 +98,11 @@ Single-quote mode applies POSIX escaping: any literal `'` inside a value is repl
 
 Control whether `--save-name` is appended to the command:
 
-| Option | Behaviour |
-|---|---|
-| **None** (default) | No `--save-name` argument; the downloader picks its own output filename |
-| **From Title** | Uses the page `document.title`, sanitised for filesystem safety |
-| **From URL** | Derives a name from the last path segment of the page URL, stripped of its extension and sanitised |
+| Option | `save_name` value | Behaviour |
+|---|---|---|
+| **None** (default) | `"none"` | No `--save-name` argument; the downloader picks its own output filename |
+| **From Title** | `"title"` | Uses the page `document.title`, sanitised for filesystem safety |
+| **From URL** | `"url"` | Derives a name from the last path segment of the page URL, stripped of its extension and sanitised |
 
 The sanitisation step removes control characters, Windows-reserved characters (`< > : " / \ | ? *`), collapses whitespace, trims leading/trailing junk, and caps the result at 120 characters. Reserved filenames (`CON`, `NUL`, `COM1`, etc.) are prefixed with `_`.
 
@@ -126,15 +126,16 @@ The manifest index passed to `buildCommand` corresponds directly to the selected
 
 ## How Manifests Are Detected
 
-The extension proxies `XMLHttpRequest.prototype.send` and `window.fetch` in the page's main world. After each response completes, it inspects the response body for manifest signatures:
+The extension proxies `XMLHttpRequest.prototype.send` and `window.fetch` in the page's main world. After each response completes, it inspects the lowercased response body for manifest signatures using `Util.getManifestType()`:
 
-| Signature | Format |
+| Detected signatures (case-insensitive) | Format |
 |---|---|
-| Response body contains `<MPD` | DASH |
-| Response body contains `#EXTM3U` | HLS |
-| Response body contains `<SmoothStreamingMedia` | MSS |
+| Body contains both `<mpd` and `</mpd>` | DASH |
+| Body contains `#extm3u` and `#ext-x-stream-inf` | HLS (master playlist) |
+| Body contains `#extm3u` (without `#ext-x-stream-inf`) | HLS (media playlist) |
+| Body contains both `<smoothstreamingmedia` and `</smoothstreamingmedia>` | MSS |
 
-When a match is found, the manifest URL is stored and associated with the current tab's page URL. At key extraction time, all manifests collected for that page URL are attached to the key entry.
+When a match is found, the manifest URL and its type are stored and associated with the current tab's page URL. At key extraction time, all manifests collected for that page URL are attached to the key entry.
 
 <Info>
   Manifest detection works for both XHR and `fetch`-based requests, and handles all XHR response types: `text`, `json`, `arraybuffer`, `blob`, and `document`. Only the first occurrence of each unique URL is stored — duplicates are deduplicated automatically.
@@ -145,11 +146,11 @@ When a match is found, the manifest URL is stored and associated with the curren
 Request headers for manifest URLs are captured by the background service worker using `chrome.webRequest.onBeforeSendHeaders`. Before the manifest request leaves the browser, the background script strips several noisy or security-sensitive headers and forwards the remainder to the content script:
 
 **Stripped headers:**
-- All headers starting with `sec-ch-ua` (client hints)
-- All headers starting with `Sec-Fetch`
-- All headers starting with `Accept-`
-- `Host`
-- `Connection`
+- All headers whose name starts with `sec-ch-ua` (client hints)
+- All headers whose name starts with `Sec-Fetch`
+- All headers whose name starts with `Accept-`
+- All headers whose name starts with `Host`
+- `Connection` (exact match)
 
 The remaining headers (such as `User-Agent`, `Origin`, `Referer`, `Cookie`, and any custom auth headers set by the page) are stored alongside the manifest URL and included as `-H` flags in the generated command.
 

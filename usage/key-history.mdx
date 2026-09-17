@@ -10,11 +10,11 @@ The extension popup's **Keys** section is intentionally scoped to recent capture
 
 <Steps>
   <Step title="Open the extension popup">
-    Click the WidevineProxy2 toolbar icon to open the popup. The **History** button sits in the top-right area of the popup, adjacent to the Keys section header.
+    Click the WidevineProxy2 toolbar icon to open the popup.
   </Step>
 
   <Step title="Click History">
-    Clicking **History** calls `chrome.tabs.create({ url: chrome.runtime.getURL("ui/history.html") })` and closes the popup. A new tab opens inside the extension's own origin, loaded with all entries from `chrome.storage.local`.
+    Click the **History** button in the popup. This calls `chrome.tabs.create({ url: chrome.runtime.getURL("ui/history.html") })` and closes the popup. A new tab opens inside the extension's own origin, loaded with all entries from `chrome.storage.local`.
   </Step>
 
   <Step title="Review the entry count">
@@ -22,7 +22,7 @@ The extension popup's **Keys** section is intentionally scoped to recent capture
   </Step>
 
   <Step title="Search and filter">
-    Use the search box to narrow entries by any text that appears in the URL, PSSH data, key values, or manifest URLs. The result count updates live as you type. Use the **type filter** buttons (All, DASH, HLS, MSS) to restrict entries by manifest type.
+    Use the search box to narrow entries by any text that appears in the URL, PSSH data, key values, or manifest data. The result count updates live as you type. Use the **type filter** buttons (All, DASH, HLS, MSS) to restrict entries by manifest type.
   </Step>
 
   <Step title="Expand an entry">
@@ -43,7 +43,7 @@ The extension popup's **Keys** section is intentionally scoped to recent capture
 
 ## Searching the History
 
-The search box filters entries in real time using the `searchText()` function, which concatenates the following fields into a single lowercase string before matching:
+The search box filters entries in real time using the `searchText()` function from `keys-render.js`, which concatenates the following fields into a single lowercase string before matching:
 
 ```js
 const parts = [entry.url, entry.pssh_data, entry.type];
@@ -53,21 +53,21 @@ manifests(entry).forEach((m) => {
 return parts.concat(keyLines(entry)).filter(Boolean).join(" ").toLowerCase();
 ```
 
-This means a single query can match against: the page URL, the PSSH hex string, the DRM type label, all manifest URLs and their type labels, and all `kid:key` values simultaneously. Searching for a partial key value, a domain name, or a PSSH fragment all work without any special syntax.
+This means a single query can match against: the page URL, the PSSH data string, the DRM type label, all manifest URLs and their type labels, and all `kid:key` values simultaneously. Searching for a partial key value, a domain name, or a PSSH fragment all work without any special syntax.
 
 ## Filtering by Manifest Type
 
-Buttons above the entry list let you restrict results to a specific manifest type:
+Buttons above the entry list let you restrict results to a specific manifest type. The filter compares against the stored `type` field of the first manifest attached to an entry (normalised via `normalizeType()`):
 
 | Button | Matches |
 |---|---|
 | **All** | Every stored entry regardless of manifest type |
-| **DASH** | Entries whose first manifest URL is identified as DASH (contains `mpd` or `dash`) |
-| **HLS** | Entries whose first manifest URL is identified as HLS (contains `m3u8` or `hls`) |
-| **MSS** | Entries whose first manifest URL is identified as Smooth Streaming (contains `ism`, `smooth`, or `mss`) |
+| **DASH** | Entries whose first manifest has a type of `DASH` or `MPD` |
+| **HLS** | Entries whose first manifest has a type of `HLS_MASTER`, `HLS_PLAYLIST`, `HLS`, or `M3U8` |
+| **MSS** | Entries whose first manifest has a type of `MSS`, `SMOOTH`, or `ISM` |
 
 <Note>
-  The type filter is based on the **first** manifest URL attached to the entry. Entries without any detected manifest are shown under **All** but not under any specific type filter.
+  The type filter is based on the **first** manifest attached to the entry. Entries without any detected manifest are shown under **All** but not under any specific type filter.
 </Note>
 
 ## Exporting and Clearing All Entries
@@ -77,7 +77,7 @@ Buttons above the entry list let you restrict results to a specific manifest typ
     The **Export All** button serialises the entire `chrome.storage.local` map as JSON and triggers a download named `widevineproxy2-keys.json`. The file contains every entry verbatim, including PSSH, keys, manifests, timestamps, and URLs.
   </Card>
   <Card title="Clear All" icon="trash">
-    The **Clear All** button calls `chrome.storage.local.clear()` after a browser confirmation dialog. This is irreversible — all stored entries are permanently deleted. The button is disabled (no-op) when the history is already empty.
+    The **Clear All** button calls `chrome.storage.local.clear()` after a browser confirmation dialog. This is irreversible — all stored entries are permanently deleted. The button is a no-op when the history is already empty.
   </Card>
 </CardGroup>
 

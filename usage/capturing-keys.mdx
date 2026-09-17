@@ -1,7 +1,7 @@
 ---
-title: "Capturing Widevine and ClearKey Decryption Keys Live"
+title: "Capturing Widevine and ClearKey Decryption Keys"
 sidebarTitle: "Capturing Keys"
-description: "Learn how the extension intercepts EME license exchanges, parses Widevine and ClearKey responses, and surfaces decryption keys in the popup."
+description: "How WidevineProxy2 intercepts EME license exchanges, parses Widevine and ClearKey responses, and surfaces decryption keys in the popup."
 ---
 
 When a browser tab plays DRM-protected video, the page calls the Encrypted Media Extensions (EME) API to negotiate a license with the DRM server. WidevineProxy2 proxies every step of that negotiation — substituting your Widevine device's identity for the browser's built-in one, forwarding the modified challenge to the license endpoint, then decoding the response to extract the raw decryption keys. The whole process happens transparently in the background; you only need to open the extension popup to see the results.
@@ -56,13 +56,15 @@ Before attempting to capture keys, make sure the following conditions are met:
 
 ### Widevine
 
-The extension intercepts `MediaKeySession.update()` calls after the license server's response reaches the browser. It decodes the raw bytes as a protobuf `SignedMessage`. If the message type is `LICENSE`, it decodes the inner `License` message and calls `session.parseLicense()` to decrypt each key container using the session's derived session key. The resulting `kid:key` hex pairs are stored in `chrome.storage.local`.
+The extension intercepts `MediaKeySession.update()` calls after the license server's response reaches the browser. It first attempts to parse the raw bytes as a ClearKey JSON response; if that fails, it decodes the bytes as a protobuf `SignedMessage`.
 
-For **Remote CDM** sessions the final parse step is delegated to the remote server via `REMOTE_PARSE`, which returns the same `kid:key` format.
+If the `SignedMessage` type is `LICENSE`, the extension decodes the inner `License` message and calls `session.parseLicense()`. That function decrypts each key container using AES-CBC with the session-derived `encKey` (derived via AES-CMAC from the session key). Only key containers whose `type === 2` are extracted — these are the content decryption keys. The resulting `kid:key` hex pairs are stored in `chrome.storage.local`.
+
+For **Remote CDM** sessions, the final parse step is delegated to the remote server via `REMOTE_PARSE`, which returns the same `kid:key` format.
 
 ### ClearKey
 
-ClearKey license responses are JSON objects. The extension decodes the UTF-8 response, parses the JSON, and converts each `kid` and `k` field from base64url (with `+`/`/` padding correction) to hex using `forge.util.bytesToHex`. The resulting pairs are stored in the same format as Widevine keys.
+ClearKey license responses are JSON objects whose `keys` array contains `kid` and `k` fields encoded as base64url strings. The extension decodes the UTF-8 response, parses the JSON, and converts each field from base64url to hex:
 
 ```js
 const decodeKey = (value) => {
@@ -71,6 +73,8 @@ const decodeKey = (value) => {
     return forge.util.bytesToHex(keyBytes);
 };
 ```
+
+The `replace` calls convert base64url to standard base64 (replacing `-` with `+` and `_` with `/`). The `==` suffix ensures the string is padded before decoding. The resulting `Uint8Array` is converted to hex via `forge.util.bytesToHex`. The resulting `kid:key` pairs are stored in the same format as Widevine keys.
 
 ## Storage and Recency
 
@@ -88,4 +92,4 @@ Each stored entry contains: `keys`, `pssh_data`, `timestamp`, `type` (`WIDEVINE`
 
 ## Icon Indicator
 
-When a new key entry is written to storage, the extension icon turns **red** for 60 seconds as a visual confirmation. The icon reverts to normal automatically after the timeout, or when the browser suspends the service worker.
+When a new key entry is written to storage, the extension icon turns **red** for 60 seconds as a visual confirmation (`setTimeout(..., 60 * 1000)` in the background service worker). The icon reverts to normal automatically after the timeout fires, or immediately when the browser suspends the service worker.

@@ -15,7 +15,7 @@ All sync values are loaded at popup boot time and written back immediately on an
 ### Extension State
 
 <ParamField path="enabled" type="boolean" default="true">
-  Master enable/disable switch for the extension. When `false`, the injected page script still loads but the EME proxy hooks are inert — no challenges are intercepted or re-signed. Toggling this does not require a page reload; the setting is read at challenge time.
+  Master enable/disable switch for the extension. When `false` (and no device is selected), the background service worker calls `chrome.scripting.unregisterContentScripts` to remove the injected page scripts entirely. When `true` and a device is selected, scripts are registered via `chrome.scripting.registerContentScripts`. Changing this setting triggers re-evaluation of script registration on the next `chrome.storage.onChanged` event.
 </ParamField>
 
 ---
@@ -55,7 +55,7 @@ Each device or remote CDM is stored as an independent key alongside the preferen
 
 <Tabs>
   <Tab title="WVD Device">
-    ```
+    ```text
     Key:   {device_name}          (the display name, e.g. "my_android_device")
     Value: "<base64 string>"      (binary .wvd file encoded as base64)
     ```
@@ -63,7 +63,7 @@ Each device or remote CDM is stored as an independent key alongside the preferen
     When the device is selected, the isolated content script fetches this key, decodes the base64 string with `Util.readWidevineDevice`, and extracts the RSA private key and `ClientIdentification` blob.
   </Tab>
   <Tab title="Remote CDM">
-    ```
+    ```text
     Key:   {display_name}         (the display name, e.g. "my_remote_cdm")
     Value: { ...remoteConfigObj } (JSON object describing the remote endpoint)
     ```
@@ -102,8 +102,8 @@ Each device or remote CDM is stored as an independent key alongside the preferen
   Controls the popup colour theme. When `true` the `data-theme="dark"` attribute is set on the document root. When `false` the light theme is applied. Saved immediately on toggle.
 </ParamField>
 
-<ParamField path="command_options_collapsed" type="boolean" default="false">
-  Stores the collapsed/expanded state of the **Command Options** section in the popup. When `true` the section is rendered collapsed on next open. Defaults to `false` (expanded) if not present; the popup initialises to collapsed via `cmdSection.classList.toggle("collapsed", settings.command_options_collapsed !== false)`.
+<ParamField path="command_options_collapsed" type="boolean" default="true">
+  Stores the collapsed/expanded state of the **Command Options** section in the popup. When `true` the section is rendered collapsed on next open. Defaults to collapsed when the key is absent, because the popup initialises via `cmdSection.classList.toggle("collapsed", settings.command_options_collapsed !== false)` — when the key is `undefined`, the expression `undefined !== false` evaluates to `true`, so the section starts collapsed. Set to `false` explicitly to keep the section expanded.
 </ParamField>
 
 ---
@@ -148,7 +148,7 @@ The popup's key list displays only entries captured within the past 5 minutes. T
 
 Each entry is stored as:
 
-```
+```text
 Key:   {pssh_data}    (base64-encoded PSSH data, or a JSON string for ClearKey)
 Value: <entry object>
 ```
@@ -205,7 +205,7 @@ Value: <entry object>
 | `use_shaka` | sync | boolean | `false` | Use Shaka Packager in commands |
 | `use_single_quotes` | sync | boolean | `false` | Single-quote command arguments |
 | `save_name` | sync | `"none" \| "title" \| "url"` | `"none"` | `--save-name` source |
-| `command_options_collapsed` | sync | boolean | `false` | Collapsed state of Command Options |
+| `command_options_collapsed` | sync | boolean | `true` | Collapsed state of Command Options |
 | `{device_name}` | sync | string (base64) | — | WVD device blob |
 | `{display_name}` | sync | object | — | Remote CDM config object |
 | `{pssh_data}` | local | object | — | Captured key entry |

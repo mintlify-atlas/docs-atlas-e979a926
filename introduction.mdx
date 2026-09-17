@@ -1,7 +1,7 @@
 ---
 title: "WidevineProxy2: EME Challenge Interception Extension"
 sidebarTitle: "Introduction"
-description: "Learn how WidevineProxy2 intercepts Widevine and ClearKey EME license challenges, re-signs them with your device key, and extracts decryption keys in real time."
+description: "Learn how WidevineProxy2 intercepts Widevine and ClearKey EME challenges, re-signs them with your device credentials, and recovers content decryption keys."
 ---
 
 WidevineProxy2 is a Manifest V3 browser extension for Chrome and Firefox that sits between a web player and the browser's Encrypted Media Extensions (EME) API. When a page requests a Widevine or ClearKey DRM license, the extension intercepts the raw challenge before it leaves the browser, re-signs it using your own Widevine device credentials, forwards the modified challenge to the license server, and then parses the server's response to extract the content decryption keys — all transparently, without breaking playback.
@@ -14,11 +14,11 @@ WidevineProxy2 is a Manifest V3 browser extension for Chrome and Firefox that si
 
 WidevineProxy2 operates across three distinct JavaScript execution contexts that the browser keeps strictly isolated from each other:
 
-| World | Script | Role |
-|---|---|---|
-| **Background service worker** | `background.js` | Manages content-script registration via `chrome.scripting`, handles remote CDM session lifecycle, relays messages between page and CDM API, and monitors HTTP traffic for manifest URLs. |
-| **Isolated content script** | `storage.js` | Bridges the MAIN world and the service worker. Handles `SETTINGS`, `KEYS`, `MANIFEST_URL`, and `REMOTE_*` message types; stores extracted keys in `chrome.storage.local`. |
-| **MAIN world script** | `page_eme.js` + `page_web.js` | Runs in the same JavaScript realm as the web page. Proxies `MediaKeySession`, `MediaKeys`, and `MediaKeySystemAccess` to intercept EME events; detects DASH/HLS/MSS manifests via patched `fetch` and `XMLHttpRequest`. |
+| World | Script ID | Source | Role |
+|---|---|---|---|
+| **Background service worker** | *(service worker)* | `background.js` | Manages content-script registration via `chrome.scripting`, handles remote CDM session lifecycle, relays messages between page and CDM API, and monitors HTTP traffic for manifest URLs. |
+| **Isolated content script** | `WVP2_ISOLATED` | `storage.js` | Bridges the MAIN world and the service worker. Handles `SETTINGS`, `KEYS`, `MANIFEST_URL`, and `REMOTE_*` message types; stores extracted keys in `chrome.storage.local`. |
+| **MAIN world script** | `WVP2_MAIN` | `page_eme.js` + `page_web.js` | Runs in the same JavaScript realm as the web page. Proxies `MediaKeySession`, `MediaKeys`, and `MediaKeySystemAccess` to intercept EME events; detects DASH/HLS/MSS manifests via patched `fetch` and `XMLHttpRequest`. |
 
 The MAIN world script wraps `MediaKeySession.addEventListener` so it can intercept the `"message"` event carrying the license challenge. Depending on the selected **proxy mode**, it either clones and re-dispatches the event (`event` mode) or overrides the `message` property in place (`property` mode). After intercepting the challenge, the script calls either the local Widevine device implementation or the remote CDM API to produce a new, correctly signed challenge, then parses the license response that the server returns to recover the decryption keys.
 

@@ -38,18 +38,20 @@ On install, startup, and any `chrome.storage.sync` change, the background calls 
 const SCRIPT_CONFIGS = [
     {
         id: "WVP2_ISOLATED",
+        matches: ["<all_urls>"],
         js: ["library/isolated/bundle.min.js"],
-        world: "ISOLATED",
         runAt: "document_start",
+        world: "ISOLATED",
         allFrames: true,
         matchOriginAsFallback: true,
         persistAcrossSessions: true,
     },
     {
         id: "WVP2_MAIN",
+        matches: ["<all_urls>"],
         js: ["library/main/bundle.min.js"],
-        world: "MAIN",
         runAt: "document_start",
+        world: "MAIN",
         allFrames: true,
         matchOriginAsFallback: true,
         persistAcrossSessions: true,
@@ -89,6 +91,18 @@ await chrome.action.setIcon({
     path: { 16: "../../images/icon-16-red.png", ... }
 });
 ```
+
+### Popup Message Handling
+
+The background responds to five additional message types sent by the popup UI:
+
+| Message type | Action |
+|---|---|
+| `OPEN_PICKER_WVD` | Opens `picker/wvd/filePicker.html` as a small popup window (320×180) |
+| `OPEN_PICKER_WVD_MOBILE` | Opens `picker/wvd/filePicker.html` as a new tab (mobile-friendly path) |
+| `OPEN_PICKER_REMOTE` | Opens `picker/remote/filePicker.html` as a small popup window |
+| `OPEN_PICKER_REMOTE_MOBILE` | Opens `picker/remote/filePicker.html` as a new tab |
+| `IS_OUTDATED` | Returns the `isOutdated` boolean flag; `true` if the latest GitHub release is newer than the installed version |
 
 ### Version Check
 
@@ -243,14 +257,25 @@ Defined in `src/library/background/remote_cdm.js`. Manages a single CDM session 
 </Accordion>
 
 <Accordion title="Util — shared helper library">
-Defined separately in `src/library/main/util.js` and `src/library/isolated/util.js`.
+Two separate `Util` classes with overlapping but distinct method sets. `src/library/main/util.js` is bundled into the main world; `src/library/isolated/util.js` is bundled into the isolated world.
 
+**Methods in `src/library/main/util.js`:**
+
+- **`Util.utf8.encode(str)` / `Util.utf8.decode(bytes)`** — UTF-8 encode (`String → Uint8Array`) and decode (`Uint8Array → String`).
 - **`Util.b64.encode(bytes)` / `Util.b64.decode(str)`** — Base64 encode/decode operating on `Uint8Array`.
-- **`Util.utf8.encode(str)` / `Util.utf8.decode(bytes)`** — UTF-8 encode/decode.
+- **`Util.sequenceEquals(arr1, arr2)`** — Returns `true` if two typed arrays are element-wise equal.
+- **`Util.safeStringify(v)`** — Converts any value to a human-readable string, handling `ArrayBuffer`, typed arrays, and circular structures without throwing.
 - **`Util.proxy(target, method, handler)`** — Replaces `target[method]` with a `Proxy` whose `apply` trap calls `handler(_target, _this, _args)`.
-- **`Util.emit(type, body)`** — Dispatches a `__ext_response` `CustomEvent` from the main world and returns a `Promise` that resolves when `__ext_responseReceived` fires with the matching `requestId`.
-- **`Util.getManifestType(body)`** — Checks if a string looks like an HLS (`.m3u8` / `#EXTM3U`) or DASH (`.mpd` / `<MPD`) manifest.
-- **`Util.readWidevineDevice(raw)`** — Deserializes a `.wvd` binary blob into `{ privateKey, clientId, deviceType }`.
+- **`Util.logEme(eventName, args, func)`** — Calls `func()`, then emits `eventName` with a success/fail payload regardless of whether `func` threw.
+- **`Util.emit(type, data)`** — Dispatches a `__ext_response` `CustomEvent` from the main world and returns a `Promise` that resolves when `__ext_responseReceived` fires with the matching `requestId`. Defaults to a 30-second timeout.
+- **`Util.getManifestType(text)`** — Returns `"DASH"`, `"HLS_MASTER"`, `"HLS_PLAYLIST"`, `"MSS"`, or `undefined` based on the content of a response body string.
+- **`Util.decodeArrayBuffer(buffer)`** — Decodes up to 4 000 bytes of an `ArrayBuffer` to a UTF-8 string (truncates head + tail for large buffers).
+- **`Util.blobToText(blob)`** — Async; reads text from a `Blob`, skipping non-text-like blobs larger than 2 MB.
+
+**Methods in `src/library/isolated/util.js`:**
+
+- **`Util.b64.encode(bytes)` / `Util.b64.decode(str)`** — Same base64 helpers as in the main-world copy.
+- **`Util.readWidevineDevice(b64Data)`** — Deserializes a base64-encoded `.wvd` binary blob, extracting the device type byte, RSA private key, and `ClientIdentification` blob. Returns `{ deviceType, privateKey, clientId }`.
 </Accordion>
 
 ## Cryptographic Stack
